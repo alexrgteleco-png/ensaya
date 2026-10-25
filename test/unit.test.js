@@ -41,3 +41,18 @@ test('fechas en hora de Madrid, también el día del cambio de hora', () => {
   const weeks = T.monthGrid(2026, 2);
   assert.strictEqual(weeks[0][0].key, '2026-01-26');
 });
+
+test('URL firmada coincide con el ejemplo oficial de AWS (presigned GET)', () => {
+  const { presignV4 } = require('../lib/storage');
+  const { signature } = presignV4({
+    method: 'GET',
+    host: 'examplebucket.s3.amazonaws.com',
+    path: '/test.txt',
+    expires: 86400,
+    now: new Date('2013-05-24T00:00:00Z'),
+    region: 'us-east-1',
+    accessKey: 'AKIAIOSFODNN7EXAMPLE',
+    secretKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+  });
+  assert.strictEqual(signature, 'aeeed9bbccd4d02ee5c0109b86d86835f995330da4c265957d157751f604d404');
+});

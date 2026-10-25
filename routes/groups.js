@@ -6,6 +6,8 @@ const { html, raw } = require('../lib/html');
 const { HttpError } = require('../lib/http');
 const { BASE_URL } = require('../lib/oidc');
 const kc = require('../lib/keycloak-admin');
+const limits = require('../lib/limits');
+const storage = require('../lib/storage');
 const { layout, pageHead, empty, csrfField, postButton, avatar, icon, paragraphs, STAVE } = require('../lib/ui');
 const { formatShort, formatLong, timeAgo, dayAndMonth } = require('../lib/time');
 const { parseId, flash, str, requireLogin, loadGroup, requireOwner } = require('./common');
@@ -173,7 +175,7 @@ module.exports = function groupRoutes(app) {
       sql`
         SELECT f.id, f.kind, f.label, f.filename, f.created_at, s.title AS song_title, u.name AS uploader
         FROM files f LEFT JOIN songs s ON s.id = f.song_id LEFT JOIN users u ON u.id = f.uploaded_by
-        WHERE f.group_id = ${g.id} ORDER BY f.created_at DESC LIMIT 5`,
+        WHERE f.group_id = ${g.id} AND f.status = 'ready' ORDER BY f.created_at DESC LIMIT 5`,
     ]);
     const c = counts[0];
     const body = html`
@@ -224,8 +226,9 @@ module.exports = function groupRoutes(app) {
   });
 
   // ---------- Ajustes (solo creador) ----------
-  app.get('/g/:gid/ajustes', loadGroup, requireOwner, (req, res) => {
-    res.html(layout(res.ctx, { title: 'Ajustes', active: 'ajustes', body: settingsPage(res.ctx, req.group) }));
+  app.get('/g/:gid/ajustes', loadGroup, requireOwner, async (req, res) => {
+    const usage = await limits.usageReport();
+    res.html(layout(res.ctx, { title: 'Ajustes', active: 'ajustes', body: html`${settingsPage(res.ctx, req.group)}${usagePanel(usage)}` }));
   });
 
   app.post('/g/:gid/ajustes', loadGroup, requireOwner, async (req, res) => {
@@ -243,10 +246,13 @@ module.exports = function groupRoutes(app) {
       flash(req, 'error', 'Escribe el nombre exacto del grupo para borrarlo.');
       return res.redirect(`/g/${req.group.id}/ajustes`);
     }
-    const files = await sql`SELECT storage_key FROM files WHERE group_id = ${req.group.id}`;
-    await sql`DELETE FROM groups WHERE id = ${req.group.id}`;
-    const storage = require('../lib/storage');
-    files.forEach((f) => storage.remove(f.storage_key).catch(() => {}));
+    const cleanup = require('../lib/cleanup');
+    await sql.begin(async (tx) => {
+      const files = await tx`SELECT storage_key, size FROM files WHERE group_id = ${req.group.id}`;
+      await cleanup.queueDeletion(tx, files);
+      await tx`DELETE FROM groups WHERE id = ${req.group.id}`;
+    });
+    cleanup.processDeletions().catch(() => {});
     flash(req, 'ok', `Has borrado ${req.group.name}.`);
     res.redirect('/');
   });
@@ -518,6 +524,27 @@ function settingsPage(ctx, group, error = '') {
       <label>Nombre del grupo<input name="confirm_name" required autocomplete="off"></label>
       <button class="button button-danger" type="submit">Borrar ${group.name}</button>
     </form>
+  </section>`;
+}
+
+function usageRow(label, value, limit, fmt) {
+  const pct = limit ? Math.min(100, Math.round((value / limit) * 100)) : 0;
+  return html`<tr><th scope="row">${label}</th><td>${fmt(value)} de ${fmt(limit)}</td>
+    <td><div class="quota ${pct >= 90 ? 'quota-high' : ''}"><div class="quota-bar" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100" aria-label="${label}"><span style="width:${pct}%"></span></div></div></td></tr>`;
+}
+
+function usagePanel(u) {
+  const n = (v) => Number(v).toLocaleString('es-ES');
+  return html`<section class="narrow panel">
+    <h2>Uso de la app (${u.month})</h2>
+    <p class="muted small">Topes fijos para que Ensaya no genere ningún coste. Se comparten entre todos los grupos de la app y los contadores mensuales vuelven a cero el día 1.</p>
+    <table class="usage-table">
+      ${usageRow('Almacenamiento', u.storageUsed, u.storageLimit, limits.formatGB)}
+      ${storage.useS3 ? usageRow('Subidas a R2 (mes)', u.classA, u.classALimit, n) : ''}
+      ${storage.useS3 ? usageRow('Lecturas de R2 (mes, estimadas)', u.classB, u.classBLimit, n) : ''}
+      ${usageRow('Tráfico de Render (mes)', u.egress, u.egressLimit, limits.formatGB)}
+    </table>
+    ${storage.useS3 ? '' : html`<p class="error-text">Los archivos se están guardando en el disco del servidor, que se borra en cada despliegue. Configura R2.</p>`}
   </section>`;
 }
 

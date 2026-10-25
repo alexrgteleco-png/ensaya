@@ -5,6 +5,8 @@ const { sql } = require('../lib/db');
 const { html, raw } = require('../lib/html');
 const { HttpError } = require('../lib/http');
 const storage = require('../lib/storage');
+const limits = require('../lib/limits');
+const cleanup = require('../lib/cleanup');
 const { layout, csrfField, postButton, icon, jsonData, formatBytes } = require('../lib/ui');
 const { timeAgo } = require('../lib/time');
 const ChordPro = require('../public/chordpro');
@@ -46,61 +48,108 @@ const TYPES = {
 // Tipos que el navegador puede mostrar sin riesgo; el resto se descarga.
 const INLINE = /^(audio\/|application\/pdf$|image\/(png|jpeg|gif|webp)$)/;
 
-function contentDisposition(type, filename) {
-  const ascii = filename.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_');
-  return `${type}; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(filename)}`;
-}
-
 async function siblings(file) {
   if (!file.song_id) return [];
-  return sql`SELECT id, label, filename, kind FROM files WHERE song_id = ${file.song_id} AND kind = ${file.kind} ORDER BY created_at`;
+  return sql`SELECT id, label, filename, kind FROM files WHERE song_id = ${file.song_id} AND kind = ${file.kind} AND status = 'ready' ORDER BY created_at`;
+}
+
+// Cuántas lecturas de R2 apuntamos por cada URL entregada. Un audio hace varias peticiones
+// parciales (Range) al reproducirse y saltar, así que se cuenta de más para ir sobre seguro.
+const READS_PER_URL = { audio: 25, pdf: 10, musicxml: 2, image: 1, other: 1 };
+
+// URL para ver o descargar un archivo. Con R2 es una URL firmada (no pasa por Render).
+async function fileUrl(g, file, { attachment = false } = {}) {
+  if (!storage.useS3) return `/g/${g.id}/archivos/${file.id}/contenido${attachment ? '?descargar=1' : ''}`;
+  await limits.useClassB(attachment ? 1 : READS_PER_URL[file.kind] || 1);
+  return storage.downloadUrl(file.storage_key, { filename: file.filename, contentType: file.mime, attachment: attachment || !INLINE.test(file.mime) });
 }
 
 module.exports = function fileRoutes(app) {
-  // Subida: el navegador envía el archivo tal cual en el cuerpo (sin multipart) y se pasa en streaming a R2.
-  app.put('/g/:gid/archivos', { rawBody: true }, loadGroup, async (req, res) => {
+  // Paso 1 de la subida: valida, reserva el espacio y devuelve dónde subir.
+  // Con R2 el navegador sube directamente a R2 con una URL firmada (tamaño y tipo incluidos en la firma).
+  app.post('/api/g/:gid/archivos', loadGroup, async (req, res) => {
     const g = req.group;
-    const name = str(req.query.name, 200).replace(/[\/\\\0]/g, '_');
-    const label = str(req.query.label, 120);
-    const size = Number(req.headers['content-length']);
+    const name = str(req.body.name, 200).replace(/[\/\\\0]/g, '_');
+    const label = str(req.body.label, 120);
+    const size = Number(req.body.size);
     if (!name) throw new HttpError(400, 'Falta el nombre del archivo.');
-    if (!Number.isFinite(size) || size <= 0) throw new HttpError(411, 'El archivo está vacío.');
+    if (!Number.isInteger(size) || size <= 0) throw new HttpError(400, 'El archivo está vacío.');
     if (size > MAX_UPLOAD) throw new HttpError(413, `El archivo pasa de ${Math.round(MAX_UPLOAD / 1048576)} MB.`);
     const ext = path.extname(name).toLowerCase();
     const type = TYPES[ext];
     if (!type) throw new HttpError(415, `No se admiten archivos ${ext || 'sin extensión'}. Sube audio, PDF, MusicXML o imágenes.`);
     let songId = null;
-    if (req.query.song) {
-      songId = parseId(req.query.song);
+    if (req.body.song) {
+      songId = parseId(req.body.song);
       const s = songId ? await sql`SELECT id FROM songs WHERE id = ${songId} AND group_id = ${g.id}` : [];
       if (!s.length) throw new HttpError(404, 'Canción no encontrada');
     }
+    // Límite de subidas a medias por persona, para que nadie bloquee espacio.
+    const [{ n }] = await sql`SELECT count(*)::int AS n FROM files WHERE uploaded_by = ${req.session.user.id} AND status = 'pending'`;
+    if (n >= 10) throw new HttpError(429, 'Tienes demasiadas subidas a medias. Espera a que terminen o vuelve a intentarlo en una hora.');
+    if (storage.useS3) await limits.useClassA(1);
     const key = storage.newKey(g.id, name);
-    await storage.put(key, req, size, type[1]);
-    const [row] = await sql`
-      INSERT INTO files (group_id, song_id, kind, label, filename, mime, size, storage_key, uploaded_by)
-      VALUES (${g.id}, ${songId}, ${type[0]}, ${label}, ${name}, ${type[1]}, ${size}, ${key}, ${req.session.user.id})
-      RETURNING id, kind`;
-    if (songId) await sql`UPDATE songs SET updated_at = now() WHERE id = ${songId}`;
-    res.json({ id: row.id, kind: row.kind, url: `/g/${g.id}/archivos/${row.id}` }, 201);
+    const file = await limits.reserveStorage({
+      group_id: g.id, song_id: songId, kind: type[0], label, filename: name, mime: type[1], size, storage_key: key, uploaded_by: req.session.user.id,
+    });
+    const upload = storage.useS3
+      ? { url: storage.uploadUrl(key, size, type[1]), method: 'PUT', headers: { 'Content-Type': type[1] } }
+      : { url: `/g/${g.id}/archivos/${file.id}/subida`, method: 'PUT', headers: { 'Content-Type': type[1], 'X-CSRF-Token': res.ctx.csrf } };
+    res.json({ id: file.id, upload, confirm: `/api/g/${g.id}/archivos/${file.id}/confirmar` }, 201);
   });
 
-  // Contenido con soporte de Range (necesario para saltar en audios largos y leer PDF por partes).
+  // Solo en desarrollo (sin R2): el archivo llega al servidor y se guarda en disco.
+  app.put('/g/:gid/archivos/:fid/subida', { rawBody: true }, loadGroup, async (req, res) => {
+    if (storage.useS3) throw new HttpError(404, 'No encontrado');
+    const fid = parseId(req.params.fid);
+    const [file] = fid ? await sql`SELECT * FROM files WHERE id = ${fid} AND group_id = ${req.group.id} AND status = 'pending' AND uploaded_by = ${req.session.user.id}` : [];
+    if (!file) throw new HttpError(404, 'Subida no encontrada o caducada');
+    if (Number(req.headers['content-length']) !== Number(file.size)) throw new HttpError(400, 'El tamaño no coincide con el anunciado.');
+    await storage.putLocal(file.storage_key, req, Number(file.size));
+    res.json({ ok: true });
+  });
+
+  // Paso 2: comprueba que el archivo llegó entero y con el tamaño reservado.
+  app.post('/api/g/:gid/archivos/:fid/confirmar', loadGroup, async (req, res) => {
+    const fid = parseId(req.params.fid);
+    const [file] = fid ? await sql`SELECT * FROM files WHERE id = ${fid} AND group_id = ${req.group.id} AND uploaded_by = ${req.session.user.id}` : [];
+    if (!file) throw new HttpError(404, 'Subida no encontrada o caducada');
+    if (file.status === 'ready') return res.json({ id: file.id, url: `/g/${req.group.id}/archivos/${file.id}` });
+    if (storage.useS3) await limits.useClassB(1);
+    const actual = await storage.head(file.storage_key);
+    if (actual === null || actual !== Number(file.size)) {
+      await sql.begin(async (tx) => {
+        await cleanup.queueDeletion(tx, [file]);
+        await tx`DELETE FROM files WHERE id = ${file.id}`;
+      });
+      cleanup.processDeletions().catch(() => {});
+      throw new HttpError(400, actual === null ? 'El archivo no llegó a subirse. Inténtalo de nuevo.' : 'El archivo subido no coincide con el anunciado y se ha descartado.');
+    }
+    await sql`UPDATE files SET status = 'ready', created_at = now() WHERE id = ${file.id}`;
+    if (file.song_id) await sql`UPDATE songs SET updated_at = now() WHERE id = ${file.song_id}`;
+    res.json({ id: file.id, url: `/g/${req.group.id}/archivos/${file.id}` });
+  });
+
+  // Ver o descargar. Con R2 redirige a una URL firmada; en local sirve el archivo con soporte de Range.
   app.get('/g/:gid/archivos/:fid/contenido', loadGroup, async (req, res) => {
     const file = await loadFile(req, req.params.fid);
+    const attachment = req.query.descargar === '1';
+    if (storage.useS3) {
+      const url = await fileUrl(req.group, file, { attachment });
+      return res.redirect(url, 302);
+    }
     const range = typeof req.headers.range === 'string' ? req.headers.range : undefined;
-    const obj = await storage.get(file.storage_key, range);
+    const obj = await storage.getLocal(file.storage_key, range);
     if (!obj) throw new HttpError(404, 'El archivo ya no está en el almacenamiento.');
-    const inline = INLINE.test(file.mime) && req.query.descargar !== '1';
-    const headers = {
+    const inline = INLINE.test(file.mime) && !attachment;
+    res.writeHead(obj.status, {
       ...obj.headers,
       'Content-Type': file.mime,
-      'Content-Disposition': contentDisposition(inline ? 'inline' : 'attachment', file.filename),
+      'Content-Disposition': storage.contentDisposition(inline ? 'inline' : 'attachment', file.filename),
       'Cache-Control': 'private, max-age=86400',
       'Content-Security-Policy': "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src 'self'",
       'X-Content-Type-Options': 'nosniff',
-    };
-    res.writeHead(obj.status, headers);
+    });
     if (!obj.stream || req.method === 'HEAD') return res.end();
     obj.stream.on('error', () => res.destroy());
     obj.stream.pipe(res);
@@ -111,7 +160,14 @@ module.exports = function fileRoutes(app) {
     const file = await loadFile(req, req.params.fid);
     const song = file.song_id ? (await sql`SELECT id, title, lyrics, song_key, bpm FROM songs WHERE id = ${file.song_id}`)[0] : null;
     const sibs = await siblings(file);
-    const src = `/g/${g.id}/archivos/${file.id}/contenido`;
+    let src = '';
+    let limitMessage = '';
+    try {
+      src = await fileUrl(g, file);
+    } catch (err) {
+      if (!err.limit) throw err;
+      limitMessage = err.message;
+    }
     const title = file.label || file.filename;
     const crumbs = html`<p class="crumbs">${song ? html`<a href="/g/${g.id}/canciones/${song.id}">${song.title}</a>` : html`<a href="/g/${g.id}/canciones">Repertorio</a>`}</p>`;
     const switcher = sibs.length > 1
@@ -126,13 +182,17 @@ module.exports = function fileRoutes(app) {
         <button class="button button-small button-ghost" type="submit">Renombrar</button>
       </form>
       <p class="actions">
-        <a class="button button-small button-ghost" href="${src}?descargar=1">Descargar</a>
+        <a class="button button-small button-ghost" href="/g/${g.id}/archivos/${file.id}/contenido?descargar=1">Descargar</a>
         ${canDelete(req, file.uploaded_by) ? postButton(res.ctx, `/g/${g.id}/archivos/${file.id}/borrar`, 'Borrar archivo', { cls: 'button button-small button-danger-ghost', confirm: `¿Borrar «${title}»?` }) : ''}
       </p>
     </details>`;
 
     let body;
     let scripts = [];
+    if (limitMessage) {
+      res.html(layout(res.ctx, { title, active: 'repertorio', body: html`${crumbs}<h1 class="h-compact">${title}</h1><section class="panel"><p>${limitMessage}</p></section>${footer}` }));
+      return;
+    }
     let modules = [];
     let bodyClass = '';
     if (file.kind === 'audio') {
@@ -173,7 +233,7 @@ module.exports = function fileRoutes(app) {
             </div>
             <ul class="marker-list" data-marker-list></ul>
           </section>
-          <audio data-audio preload="metadata" src="${src}"></audio>
+          <audio data-audio preload="metadata" crossorigin="anonymous" src="${src}"></audio>
         </section>
         ${song && song.lyrics
           ? html`<details class="lyrics-panel lyrics-under" data-chordpro data-key="${song.song_key}" open>
@@ -260,7 +320,7 @@ module.exports = function fileRoutes(app) {
         <figure class="image-view"><img src="${src}" alt="${title}"></figure>${footer}`;
     } else {
       body = html`${crumbs}<h1 class="h-compact">${title}</h1>
-        <section class="panel"><p>Este tipo de archivo no se puede ver en el navegador.</p><a class="button" href="${src}?descargar=1">Descargar ${file.filename}</a></section>${footer}`;
+        <section class="panel"><p>Este tipo de archivo no se puede ver en el navegador.</p><a class="button" href="/g/${g.id}/archivos/${file.id}/contenido?descargar=1">Descargar ${file.filename}</a></section>${footer}`;
     }
     res.html(layout(res.ctx, { title, active: 'repertorio', scripts, modules, bodyClass, body }));
   });
@@ -276,8 +336,11 @@ module.exports = function fileRoutes(app) {
     const g = req.group;
     const file = await loadFile(req, req.params.fid);
     if (!canDelete(req, file.uploaded_by)) throw new HttpError(403, 'Solo quien subió el archivo o quien creó el grupo puede borrarlo.');
-    await sql`DELETE FROM files WHERE id = ${file.id}`;
-    await storage.remove(file.storage_key).catch((err) => console.error('No se pudo borrar del almacenamiento:', err.message));
+    await sql.begin(async (tx) => {
+      await cleanup.queueDeletion(tx, [file]);
+      await tx`DELETE FROM files WHERE id = ${file.id}`;
+    });
+    cleanup.processDeletions().catch(() => {});
     flash(req, 'ok', 'Archivo borrado.');
     res.redirect(file.song_id ? `/g/${g.id}/canciones/${file.song_id}` : `/g/${g.id}`);
   });

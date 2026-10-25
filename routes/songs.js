@@ -5,7 +5,8 @@ const { html, raw } = require('../lib/html');
 const { layout, pageHead, empty, csrfField, postButton, icon, paragraphs, jsonData, formatBytes } = require('../lib/ui');
 const { formatDuration, parseDuration, timeAgo } = require('../lib/time');
 const ChordPro = require('../public/chordpro');
-const storage = require('../lib/storage');
+const cleanup = require('../lib/cleanup');
+const limits = require('../lib/limits');
 const { str, intOrNull, flash, loadGroup, loadSong, canDelete } = require('./common');
 
 const STATUS = { idea: 'Idea', aprendiendo: 'Aprendiendo', lista: 'Lista para tocar', retirada: 'Retirada' };
@@ -91,14 +92,22 @@ function fileRow(g, f) {
   </li>`;
 }
 
-function uploader(ctx, g, songId) {
-  return html`<form class="uploader" data-upload="/g/${g.id}/archivos" data-song="${songId || ''}">
+function uploader(ctx, g, songId, used = null) {
+  const L = limits.LIMITS.storageBytes;
+  const pct = used === null ? 0 : Math.min(100, Math.round((used / L) * 100));
+  return html`<form class="uploader" data-upload="/api/g/${g.id}/archivos" data-song="${songId || ''}" data-free="${used === null ? '' : Math.max(0, L - used)}">
     <label class="dropzone">
       <input type="file" name="file" multiple accept="audio/*,.mp3,.wav,.flac,.m4a,.ogg,.aac,.pdf,.musicxml,.mxl,.xml,image/*">
       <span>${icon('plus')} <b>Sube audio o partituras</b><br><span class="muted">MP3, WAV, FLAC, M4A, PDF, MusicXML o imágenes. Arrastra aquí o pulsa para elegir.</span></span>
     </label>
     <label class="upload-label">Nombre <span class="hint">opcional, p. ej. «Maqueta», «Parte de bajo»</span><input name="label" maxlength="120"></label>
     <ul class="upload-progress" aria-live="polite"></ul>
+    ${used !== null
+      ? html`<div class="quota ${pct >= 90 ? 'quota-high' : ''}">
+          <div class="quota-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}" aria-label="Espacio usado"><span style="width:${pct}%"></span></div>
+          <span class="muted small">Espacio usado por la app: ${limits.formatGB(used)} de ${limits.formatGB(L)}. El tope evita cualquier coste.</span>
+        </div>`
+      : ''}
   </form>`;
 }
 
@@ -111,8 +120,8 @@ module.exports = function songRoutes(app) {
     const like = `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
     const songs = await sql`
       SELECT s.*,
-        (SELECT count(*) FROM files f WHERE f.song_id = s.id AND f.kind = 'audio')::int AS audios,
-        (SELECT count(*) FROM files f WHERE f.song_id = s.id AND f.kind IN ('pdf', 'musicxml', 'image'))::int
+        (SELECT count(*) FROM files f WHERE f.song_id = s.id AND f.kind = 'audio' AND f.status = 'ready')::int AS audios,
+        (SELECT count(*) FROM files f WHERE f.song_id = s.id AND f.kind IN ('pdf', 'musicxml', 'image') AND f.status = 'ready')::int
           + (SELECT count(*) FROM scores sc WHERE sc.song_id = s.id)::int AS sheets
       FROM songs s
       WHERE s.group_id = ${g.id}
@@ -170,10 +179,11 @@ module.exports = function songRoutes(app) {
   app.get('/g/:gid/canciones/:sid', loadGroup, async (req, res) => {
     const g = req.group;
     const song = await loadSong(req, req.params.sid);
-    const [files, scores, setlists] = await Promise.all([
-      sql`SELECT f.*, u.name AS uploader FROM files f LEFT JOIN users u ON u.id = f.uploaded_by WHERE f.song_id = ${song.id} ORDER BY f.kind, f.created_at`,
+    const [files, scores, setlists, used] = await Promise.all([
+      sql`SELECT f.*, u.name AS uploader FROM files f LEFT JOIN users u ON u.id = f.uploaded_by WHERE f.song_id = ${song.id} AND f.status = 'ready' ORDER BY f.kind, f.created_at`,
       sql`SELECT sc.id, sc.title, sc.updated_at, u.name AS editor FROM scores sc LEFT JOIN users u ON u.id = sc.updated_by WHERE sc.song_id = ${song.id} ORDER BY sc.title`,
       sql`SELECT DISTINCT l.id, l.name FROM setlists l JOIN setlist_items i ON i.setlist_id = l.id WHERE i.song_id = ${song.id} ORDER BY l.name`,
+      limits.storageUsed(),
     ]);
     const audios = files.filter((f) => f.kind === 'audio');
     const sheets = files.filter((f) => f.kind !== 'audio');
@@ -218,7 +228,7 @@ module.exports = function songRoutes(app) {
               <button class="button button-small button-ghost" type="submit">${icon('plus', 15)} Escribir partitura</button>
             </form>
           </section>
-          ${uploader(res.ctx, g, song.id)}
+          ${uploader(res.ctx, g, song.id, used)}
           ${setlists.length ? html`<section><h2>En setlists</h2><ul class="plain-list">${setlists.map((l) => html`<li><a href="/g/${g.id}/setlists/${l.id}">${l.name}</a></li>`)}</ul></section>` : ''}
         </div>
         <div class="song-main">
@@ -269,9 +279,12 @@ module.exports = function songRoutes(app) {
       flash(req, 'error', 'Solo quien añadió la canción o quien creó el grupo puede borrarla.');
       return res.redirect(`/g/${g.id}/canciones/${song.id}`);
     }
-    const files = await sql`SELECT storage_key FROM files WHERE song_id = ${song.id}`;
-    await sql`DELETE FROM songs WHERE id = ${song.id}`;
-    files.forEach((f) => storage.remove(f.storage_key).catch(() => {}));
+    await sql.begin(async (tx) => {
+      const files = await tx`SELECT storage_key, size FROM files WHERE song_id = ${song.id}`;
+      await cleanup.queueDeletion(tx, files);
+      await tx`DELETE FROM songs WHERE id = ${song.id}`;
+    });
+    cleanup.processDeletions().catch(() => {});
     flash(req, 'ok', `«${song.title}» borrada.`);
     res.redirect(`/g/${g.id}/canciones`);
   });

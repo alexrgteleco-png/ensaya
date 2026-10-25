@@ -373,7 +373,7 @@ window.addEventListener('resize', () => {
 (async function init() {
   stage.textContent = 'Cargando partitura…';
   try {
-    state.pdf = await pdfjsLib.getDocument({ url: root.dataset.src, withCredentials: true }).promise;
+    state.pdf = await pdfjsLib.getDocument({ url: root.dataset.src, withCredentials: false }).promise;
   } catch (e) {
     stage.textContent = 'No se pudo abrir el PDF. Descárgalo desde «Datos del archivo».';
     return;

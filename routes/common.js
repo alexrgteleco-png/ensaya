@@ -76,7 +76,7 @@ async function loadSong(req, id) {
 async function loadFile(req, id) {
   const fid = parseId(id);
   if (!fid) throw new HttpError(404, 'Archivo no encontrado');
-  const rows = await sql`SELECT * FROM files WHERE id = ${fid} AND group_id = ${req.group.id}`;
+  const rows = await sql`SELECT * FROM files WHERE id = ${fid} AND group_id = ${req.group.id} AND status = 'ready'`;
   if (!rows.length) throw new HttpError(404, 'Archivo no encontrado');
   return rows[0];
 }

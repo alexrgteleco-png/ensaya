@@ -25,30 +25,32 @@
       };
       if (file.size > MAX) return fail('Pasa de 300 MB. Comprímelo (por ejemplo, a MP3) y vuelve a probar.');
       if (!file.size) return fail('El archivo está vacío.');
-      var params = new URLSearchParams({ name: file.name });
-      if (label) params.set('label', label);
-      if (form.dataset.song) params.set('song', form.dataset.song);
-      var xhr = new XMLHttpRequest();
-      xhr.open('PUT', form.dataset.upload + '?' + params.toString());
-      xhr.setRequestHeader('X-CSRF-Token', window.Ensaya.csrf);
-      xhr.setRequestHeader('Accept', 'application/json');
-      xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
-      xhr.upload.onprogress = function (e) {
-        if (e.lengthComputable) bar.value = Math.round((e.loaded / e.total) * 100);
-      };
-      xhr.onload = function () {
-        var data = null;
-        try { data = JSON.parse(xhr.responseText); } catch (e) { data = null; }
-        if (xhr.status >= 200 && xhr.status < 300) {
-          bar.value = 100;
-          name.textContent = file.name + ' · subido';
-          resolve(true);
-        } else {
-          fail((data && data.error) || 'No se pudo subir (error ' + xhr.status + ').');
-        }
-      };
-      xhr.onerror = function () { fail('Se cortó la conexión. Vuelve a intentarlo.'); };
-      xhr.send(file);
+      var free = form.dataset.free === '' ? Infinity : Number(form.dataset.free);
+      if (file.size > free) return fail('No queda espacio suficiente (tope de la app para no generar costes). Borra audios que no uséis o comprímelos.');
+      var E = window.Ensaya;
+      E.api('POST', form.dataset.upload, { name: file.name, size: file.size, label: label || '', song: form.dataset.song || '' })
+        .then(function (prep) {
+          var xhr = new XMLHttpRequest();
+          xhr.open(prep.upload.method, prep.upload.url);
+          Object.keys(prep.upload.headers).forEach(function (h) { xhr.setRequestHeader(h, prep.upload.headers[h]); });
+          xhr.upload.onprogress = function (e) {
+            if (e.lengthComputable) bar.value = Math.round((e.loaded / e.total) * 100);
+          };
+          xhr.onload = function () {
+            if (xhr.status >= 200 && xhr.status < 300) {
+              E.api('POST', prep.confirm).then(function () {
+                bar.value = 100;
+                name.textContent = file.name + ' · subido';
+                form.dataset.free = String(free - file.size);
+                resolve(true);
+              }, function (err) { fail(err.message); });
+            } else {
+              fail('No se pudo subir (error ' + xhr.status + '). Vuelve a intentarlo.');
+            }
+          };
+          xhr.onerror = function () { fail('Se cortó la conexión. Vuelve a intentarlo.'); };
+          xhr.send(file);
+        }, function (err) { fail(err.message); });
     });
   }
 

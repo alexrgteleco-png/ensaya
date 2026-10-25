@@ -183,3 +183,24 @@ CREATE TABLE IF NOT EXISTS event_songs (
   position  integer NOT NULL DEFAULT 0,
   PRIMARY KEY (event_id, song_id)
 );
+
+-- ---------- Control de costes ----------
+-- Una subida reserva su tamaño antes de empezar (status 'pending') y pasa a 'ready' al confirmarse.
+ALTER TABLE files ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'ready';
+CREATE INDEX IF NOT EXISTS files_pending_idx ON files (created_at) WHERE status = 'pending';
+
+-- Objetos que hay que borrar del almacenamiento (se reintenta hasta lograrlo; cuentan como ocupados).
+CREATE TABLE IF NOT EXISTS pending_deletions (
+  storage_key  text PRIMARY KEY,
+  size         bigint NOT NULL DEFAULT 0,
+  attempts     integer NOT NULL DEFAULT 0,
+  created_at   timestamptz NOT NULL DEFAULT now()
+);
+
+-- Contadores mensuales: operaciones de R2 y tráfico de salida de Render.
+CREATE TABLE IF NOT EXISTS usage_counters (
+  month   text NOT NULL,
+  metric  text NOT NULL,
+  value   bigint NOT NULL DEFAULT 0,
+  PRIMARY KEY (month, metric)
+);
