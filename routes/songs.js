@@ -228,6 +228,11 @@ module.exports = function songRoutes(app) {
               <button class="button button-small button-ghost" type="submit">${icon('plus', 15)} Escribir partitura</button>
             </form>
           </section>
+          <section class="panel sg-teaser">
+            <h2>${icon('score')} Generador de solos</h2>
+            <p class="muted">Solos aleatorios en el tono de la canción con el estilo, ritmo y escala que elijas. Escúchalos con acompañamiento y guarda los que te gusten.</p>
+            <a class="button" href="/g/${g.id}/canciones/${song.id}/solos">Abrir generador de solos</a>
+          </section>
           ${uploader(res.ctx, g, song.id, used)}
           ${setlists.length ? html`<section><h2>En setlists</h2><ul class="plain-list">${setlists.map((l) => html`<li><a href="/g/${g.id}/setlists/${l.id}">${l.name}</a></li>`)}</ul></section>` : ''}
         </div>

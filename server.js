@@ -88,6 +88,7 @@ require('./routes/scores')(app);
 require('./routes/events')(app);
 require('./routes/setlists')(app);
 require('./routes/tools')(app);
+require('./routes/solos')(app);
 
 app.errorHandler = async (err, req, res) => {
   const status = err.status || 500;

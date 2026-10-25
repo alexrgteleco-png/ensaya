@@ -24,6 +24,7 @@ ensayos, setlists y modo escenario.
 | Agenda: calendario mensual, ensayos y conciertos, asistencia, canciones a trabajar, objetivos, notas tras el ensayo, exportar a calendario (.ics) | Miembros |
 | Setlists: añadir canciones, descansos y textos, ordenar arrastrando o con flechas, tono y nota por canción, duración total, duplicar, imprimir | Miembros |
 | Modo escenario: letras y acordes a pantalla completa, pedal o flechas, transposición en vivo, tamaño de letra, desplazamiento automático, tema claro/oscuro y uso **sin conexión** | Miembros |
+| Generador de solos por canción: estilo (rock, blues, jazz, funk, flamenco, metal, balada, pop), tonalidad, 12 escalas, tempo, compás, densidad, silencios, swing, variabilidad, repetición de motivos, seguimiento de acordes, cromatismos, adornos, registro; partitura y tablatura, sonido con acordes, bajo y batería, historial, enlace reproducible, MIDI y guardar como partitura | Miembros |
 | Afinador cromático y metrónomo | Miembros |
 | Borrar canciones, archivos, partituras, eventos o setlists | Quien los creó o quien creó el grupo |
 
