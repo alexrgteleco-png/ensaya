@@ -16,7 +16,13 @@
   var STORE = 'ensaya.solos.' + data.song.id;
 
   var GEN_KEYS = ['style', 'key', 'scale', 'tempo', 'meter', 'bars', 'density', 'rests', 'swing', 'variability', 'repetition', 'chordFollow', 'chromatic', 'ornaments', 'register', 'range', 'endOnTonic', 'progression'];
-  var UI_DEFAULTS = { instrument: 'guitarra', transpose: '0', volSolo: 80, volBand: 45, volDrums: 50, tab: false, countIn: true };
+  var SEN = window.SoundEngine;
+  var UI_DEFAULTS = (function () {
+    var d = { instrument: 'gtr_rock', soundPreset: 'lead_rock', quality: 'alta', chords: 'pno_bright', bass: 'bass_pick', transpose: '0', volSolo: 80, volBand: 45, volDrums: 50, tab: false, countIn: true };
+    var fx = SEN.presetFx('gtr_rock');
+    Object.keys(fx).forEach(function (k) { d['fx_' + k] = fx[k]; });
+    return d;
+  })();
 
   var state = { history: [], pos: -1, current: null, elements: [], loop: false };
 
@@ -68,6 +74,8 @@
       var v = Number(el.value);
       var name = o.dataset.out;
       if (name === 'density') o.textContent = v <= 3 ? 'Pocas (' + v + ')' : v <= 6 ? 'Media (' + v + ')' : 'Muchas (' + v + ')';
+      else if (name === 'fx_bass' || name === 'fx_mid' || name === 'fx_treble') o.textContent = (v > 0 ? '+' : '') + v + ' dB';
+      else if (name === 'fx_pan') o.textContent = v === 0 ? 'Centro' : v < 0 ? 'Izq. ' + -v : 'Der. ' + v;
       else o.textContent = v + ' %';
     });
   }
@@ -111,6 +119,7 @@
     render(result);
     persist();
     if (synth.playing) synth.restart(result);
+    else synth.warm(result);
   }
 
   function newSolo(seed) {
@@ -126,6 +135,7 @@
     updateHistory();
     persist();
     if (synth.playing) synth.restart(result);
+    else synth.warm(result);
   }
 
   function goHistory(delta) {
@@ -159,249 +169,177 @@
     }
   }
 
-  // ---------- Sonido ----------
+  // ---------- Sonido (muestras reales + efectos) ----------
+  var SE = window.SoundEngine;
+  var statusEl = root.querySelector('[data-sound-status]');
+  var FX_KEYS = Object.keys(SE.FX_DEFAULT);
+
+  function fxFromForm(ui) {
+    var fx = {};
+    FX_KEYS.forEach(function (k) {
+      var v = ui['fx_' + k];
+      fx[k] = typeof SE.FX_DEFAULT[k] === 'number' ? Number(v) : v;
+    });
+    return fx;
+  }
+
+  function fxToForm(fx) {
+    var vals = {};
+    FX_KEYS.forEach(function (k) { vals['fx_' + k] = fx[k]; });
+    setForm(vals);
+  }
+
+  function setStatus(text, kind) {
+    statusEl.textContent = text;
+    statusEl.className = 'sg-status small ' + (kind || '');
+  }
+
+  function voicing(tones) {
+    return tones.map(function (pc) {
+      var m = 55 + ((pc - 55) % 12 + 12) % 12;
+      return m;
+    }).sort(function (a, b) { return a - b; });
+  }
+
   var synth = (function () {
     var ctx = null;
-    var master = null;
-    var noise = null;
-    var nodes = [];
+    var engine = null;
+    var current = null;
     var startAt = 0;
     var timer = null;
     var raf = null;
-    var current = null;
-    var offset = 0;
+    var loading = null;
 
     function ensure() {
       if (!ctx) {
         ctx = new (window.AudioContext || window.webkitAudioContext)();
-        master = ctx.createDynamicsCompressor();
-        master.connect(ctx.destination);
-        var len = ctx.sampleRate;
-        noise = ctx.createBuffer(1, len, ctx.sampleRate);
-        var d = noise.getChannelData(0);
-        for (var i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+        engine = SE.create(ctx, { quality: readForm().quality });
       }
       if (ctx.state === 'suspended') ctx.resume();
+      applySettings();
     }
 
-    function freq(midi) {
-      return 440 * Math.pow(2, (midi - 69) / 12);
-    }
-
-    function track(n) {
-      nodes.push(n);
-      return n;
-    }
-
-    function voice(midi, t, dur, vel, kind, gainMul) {
+    function applySettings() {
+      if (!engine) return;
       var ui = readForm();
-      var vol = (ui.volSolo / 100) * vel * (gainMul || 1);
-      if (vol <= 0) return;
-      var out = ctx.createGain();
-      out.connect(master);
-      track(out);
-      var f = freq(midi);
-      var oscs = [];
-      var filter = ctx.createBiquadFilter();
-      filter.type = 'lowpass';
-      filter.connect(out);
-      if (kind === 'saxo') {
-        var o = ctx.createOscillator();
-        o.type = 'sawtooth';
-        o.frequency.value = f;
-        var lfo = ctx.createOscillator();
-        var lfoGain = ctx.createGain();
-        lfo.frequency.value = 5.5;
-        lfoGain.gain.setValueAtTime(0, t);
-        lfoGain.gain.linearRampToValueAtTime(f * 0.006, t + Math.min(0.25, dur));
-        lfo.connect(lfoGain);
-        lfoGain.connect(o.frequency);
-        lfo.start(t);
-        lfo.stop(t + dur + 0.2);
-        track(lfo);
-        oscs.push(o);
-        filter.frequency.value = 2200;
-        filter.Q.value = 2;
-        out.gain.setValueAtTime(0.0001, t);
-        out.gain.exponentialRampToValueAtTime(0.22 * vol, t + 0.04);
-        out.gain.setValueAtTime(0.2 * vol, t + Math.max(0.05, dur - 0.05));
-        out.gain.exponentialRampToValueAtTime(0.0001, t + dur + 0.08);
-      } else if (kind === 'synth') {
-        var q = ctx.createOscillator();
-        q.type = 'square';
-        q.frequency.value = f;
-        oscs.push(q);
-        filter.frequency.value = 2600;
-        out.gain.setValueAtTime(0.0001, t);
-        out.gain.exponentialRampToValueAtTime(0.13 * vol, t + 0.01);
-        out.gain.setValueAtTime(0.12 * vol, t + Math.max(0.02, dur - 0.03));
-        out.gain.exponentialRampToValueAtTime(0.0001, t + dur + 0.05);
-      } else if (kind === 'piano') {
-        var tri = ctx.createOscillator();
-        tri.type = 'triangle';
-        tri.frequency.value = f;
-        var sin = ctx.createOscillator();
-        sin.type = 'sine';
-        sin.frequency.value = f * 2;
-        oscs.push(tri, sin);
-        filter.frequency.value = 5000;
-        out.gain.setValueAtTime(0.0001, t);
-        out.gain.exponentialRampToValueAtTime(0.3 * vol, t + 0.005);
-        out.gain.exponentialRampToValueAtTime(0.0001, t + Math.min(2.5, dur + 1.2));
-      } else {
-        // Guitarra eléctrica: dos dientes de sierra algo desafinados y filtro que se cierra.
-        [-4, 4].forEach(function (cents) {
-          var s = ctx.createOscillator();
-          s.type = 'sawtooth';
-          s.frequency.value = f;
-          s.detune.value = cents;
-          oscs.push(s);
-        });
-        filter.frequency.setValueAtTime(3800, t);
-        filter.frequency.exponentialRampToValueAtTime(1100, t + Math.min(0.6, dur + 0.2));
-        filter.Q.value = 1.5;
-        out.gain.setValueAtTime(0.0001, t);
-        out.gain.exponentialRampToValueAtTime(0.16 * vol, t + 0.004);
-        out.gain.exponentialRampToValueAtTime(0.09 * vol, t + Math.min(0.25, dur));
-        out.gain.setValueAtTime(0.09 * vol, t + Math.max(0.01, dur - 0.02));
-        out.gain.exponentialRampToValueAtTime(0.0001, t + dur + 0.12);
-      }
-      oscs.forEach(function (o2) {
-        o2.connect(filter);
-        o2.start(t);
-        o2.stop(t + dur + (kind === 'piano' ? 2.6 : 0.3));
-        track(o2);
+      engine.setQuality(ui.quality);
+      engine.applyFx(fxFromForm(ui), Number(ui.tempo) || 100);
+      engine.setLevels({ solo: ui.volSolo / 100, band: ui.volBand / 100, drums: ui.volDrums / 100 });
+    }
+
+    function samples() {
+      var ui = readForm();
+      var inst = SE.INSTRUMENTS[ui.instrument] || SE.INSTRUMENTS.gtr_rock;
+      return {
+        solo: inst.sample,
+        chords: (SE.CHORD_INSTRUMENTS[ui.chords] || {}).sample || null,
+        bass: (SE.BASS_INSTRUMENTS[ui.bass] || {}).sample || null,
+      };
+    }
+
+    function requestsFor(result) {
+      var s = samples();
+      var solo = {};
+      result.events.notes.forEach(function (n) {
+        if (n.rest) return;
+        solo[n.midi] = true;
+        if (n.grace) solo[n.grace] = true;
       });
-    }
-
-    function pad(tones, rootPc, t, dur) {
-      var ui = readForm();
-      var vol = ui.volBand / 100;
-      if (vol <= 0) return;
-      // Acorde alrededor de Do4 y bajo en la segunda octava.
-      tones.forEach(function (pc) {
-        var midi = 60 + ((pc - 60) % 12 + 12) % 12;
-        if (midi > 67) midi -= 12;
-        var o = ctx.createOscillator();
-        o.type = 'triangle';
-        o.frequency.value = freq(midi);
-        var g = ctx.createGain();
-        g.gain.setValueAtTime(0.0001, t);
-        g.gain.linearRampToValueAtTime(0.035 * vol, t + 0.08);
-        g.gain.setValueAtTime(0.035 * vol, t + dur - 0.1);
-        g.gain.linearRampToValueAtTime(0.0001, t + dur);
-        o.connect(g);
-        g.connect(master);
-        o.start(t);
-        o.stop(t + dur + 0.05);
-        track(o);
-        track(g);
+      var chordNotes = {};
+      var bassNotes = {};
+      result.events.chords.forEach(function (c) {
+        voicing(c.tones).forEach(function (m) { chordNotes[m] = true; });
+        bassNotes[36 + c.root] = true;
       });
+      var keys = function (o) { return Object.keys(o).map(Number); };
+      return [
+        { sample: s.solo, midis: keys(solo) },
+        { sample: s.chords, midis: keys(chordNotes) },
+        { sample: s.bass, midis: keys(bassNotes) },
+      ];
     }
 
-    function bass(rootPc, t, dur) {
-      var ui = readForm();
-      var vol = ui.volBand / 100;
-      if (vol <= 0) return;
-      var o = ctx.createOscillator();
-      o.type = 'triangle';
-      o.frequency.value = freq(36 + rootPc);
-      var g = ctx.createGain();
-      g.gain.setValueAtTime(0.0001, t);
-      g.gain.exponentialRampToValueAtTime(0.3 * vol, t + 0.01);
-      g.gain.exponentialRampToValueAtTime(0.0001, t + dur * 0.95);
-      o.connect(g);
-      g.connect(master);
-      o.start(t);
-      o.stop(t + dur);
-      track(o);
-      track(g);
+    // Descarga las muestras que falten (sin bloquear más de 15 s).
+    function prepare(result) {
+      ensure();
+      var reqs = requestsFor(result);
+      var p = engine.preload(reqs, function (done, total, failed) {
+        if (total) setStatus('Cargando sonidos reales… ' + done + ' de ' + total, 'loading');
+        if (done === total) {
+          if (failed === total && total > 0) setStatus('Sin conexión con el banco de sonidos: se usa sonido sintetizado.', 'warn');
+          else if (failed) setStatus('Sonidos listos (' + failed + ' notas con sonido sintetizado).', 'ok');
+          else setStatus('Sonidos reales listos.', 'ok');
+        }
+      });
+      var timeout = new Promise(function (resolve) { setTimeout(function () { resolve({ timeout: true }); }, 15000); });
+      loading = Promise.race([p, timeout]);
+      return loading;
     }
 
-    function drum(type, t, vel) {
-      var ui = readForm();
-      var vol = (ui.volDrums / 100) * (vel || 1);
-      if (vol <= 0) return;
-      var g = ctx.createGain();
-      g.connect(master);
-      track(g);
-      if (type === 'kick') {
-        var o = ctx.createOscillator();
-        o.frequency.setValueAtTime(140, t);
-        o.frequency.exponentialRampToValueAtTime(40, t + 0.12);
-        g.gain.setValueAtTime(0.7 * vol, t);
-        g.gain.exponentialRampToValueAtTime(0.0001, t + 0.18);
-        o.connect(g);
-        o.start(t);
-        o.stop(t + 0.2);
-        track(o);
-        return;
-      }
-      var src = ctx.createBufferSource();
-      src.buffer = noise;
-      var f = ctx.createBiquadFilter();
-      if (type === 'snare') {
-        f.type = 'bandpass';
-        f.frequency.value = 1800;
-        g.gain.setValueAtTime(0.35 * vol, t);
-        g.gain.exponentialRampToValueAtTime(0.0001, t + 0.14);
-      } else {
-        f.type = 'highpass';
-        f.frequency.value = 7000;
-        g.gain.setValueAtTime(0.12 * vol, t);
-        g.gain.exponentialRampToValueAtTime(0.0001, t + 0.04);
-      }
-      src.connect(f);
-      f.connect(g);
-      src.start(t);
-      src.stop(t + 0.2);
-      track(src);
-    }
-
-    function scheduleDrums(ev, t0, swing) {
+    function scheduleDrums(result, t0) {
+      var ev = result.events;
+      var p = result.params;
       var bpb = ev.beatsPerBar;
       var beat = ev.beatSec;
-      var bars = ev.chords.length;
-      var compound = Math.abs(beat - 60 / current.params.tempo * 1.5) < 1e-6;
-      for (var b = 0; b < bars; b++) {
+      var swing = p.swing / 100;
+      var compound = p.meter === '6/8' || p.meter === '12/8';
+      for (var b = 0; b < ev.chords.length; b++) {
         for (var k = 0; k < bpb; k++) {
           var t = t0 + (b * bpb + k) * beat;
-          if (k === 0 || (bpb === 4 && k === 2)) drum('kick', t);
-          if ((bpb === 4 && (k === 1 || k === 3)) || (bpb === 2 && k === 1) || (bpb === 3 && k === 1)) drum('snare', t);
+          if (p.style === 'flamenco') {
+            // Palmas: acentos en cada pulso y contratiempos.
+            engine.drum('clap', t, k === 0 ? 1 : 0.7);
+            if (compound) engine.drum('clap', t + (2 * beat) / 3, 0.45);
+            else engine.drum('clap', t + beat / 2, 0.45);
+            if (k === 0) engine.drum('kick', t, 0.5);
+            continue;
+          }
+          if (p.style === 'jazz') {
+            engine.drum('ride', t, 0.9);
+            engine.drum('ride', t + beat * (0.5 + swing * 0.1667), 0.55);
+            if (k % 2 === 1) engine.drum('hat', t, 0.6);
+            if (k === 0) engine.drum('kick', t, 0.4);
+            continue;
+          }
+          if (k === 0 || (bpb === 4 && k === 2)) engine.drum('kick', t);
+          if ((bpb === 4 && (k === 1 || k === 3)) || (bpb === 2 && k === 1) || (bpb === 3 && k === 1)) engine.drum('snare', t);
           if (compound) {
-            for (var s = 0; s < 3; s++) drum('hat', t + (s * beat) / 3, s === 0 ? 1 : 0.6);
+            for (var s = 0; s < 3; s++) engine.drum('hat', t + (s * beat) / 3, s === 0 ? 1 : 0.6);
+          } else if (p.style === 'funk' || p.style === 'metal') {
+            for (var q = 0; q < 4; q++) engine.drum('hat', t + (q * beat) / 4, q === 0 ? 1 : 0.5);
           } else {
-            drum('hat', t, 1);
-            drum('hat', t + beat * (0.5 + swing * 0.1667), 0.6);
+            engine.drum('hat', t, 1);
+            engine.drum('hat', t + beat * (0.5 + swing * 0.1667), 0.6);
           }
         }
       }
     }
 
     function scheduleAll(result, t0) {
-      var ui = readForm();
+      var s = samples();
       var ev = result.events;
+      var guitar = /^gtr_/.test(readForm().instrument);
       ev.notes.forEach(function (n) {
         if (n.rest) return;
         var t = t0 + n.time;
         if (n.grace) {
-          voice(n.grace, t - 0.05, 0.06, n.velocity * 0.8, ui.instrument);
+          var diff = n.midi - n.grace;
+          if (guitar && diff > 0 && diff <= 2) {
+            engine.soloNote(s.solo, n.midi, t, n.duration, n.velocity, { bendFrom: diff });
+            return;
+          }
+          engine.soloNote(s.solo, n.grace, t - 0.05, 0.06, n.velocity * 0.8);
         }
-        voice(n.midi, t, n.duration, n.velocity, ui.instrument);
+        engine.soloNote(s.solo, n.midi, t, n.duration, n.velocity);
       });
       ev.chords.forEach(function (c) {
-        pad(c.tones, c.root, t0 + c.time, c.duration);
-        for (var k = 0; k < ev.beatsPerBar; k++) bass(c.root, t0 + c.time + k * ev.beatSec, ev.beatSec);
+        voicing(c.tones).forEach(function (m) { engine.bandNote(s.chords, m, t0 + c.time, c.duration * 0.98, 0.42, 'pad'); });
+        for (var k = 0; k < ev.beatsPerBar; k++) {
+          var bassMidi = 36 + c.root;
+          engine.bandNote(s.bass, bassMidi, t0 + c.time + k * ev.beatSec, ev.beatSec * 0.9, k === 0 ? 0.95 : 0.75, 'bass');
+        }
       });
-      scheduleDrums(ev, t0, result.params.swing / 100);
-    }
-
-    function stopNodes() {
-      nodes.forEach(function (n) {
-        try { if (n.stop) n.stop(); } catch (e) { /* ya parado */ }
-        try { n.disconnect(); } catch (e) { /* nada */ }
-      });
-      nodes = [];
+      scheduleDrums(result, t0);
     }
 
     function highlight() {
@@ -428,7 +366,7 @@
       var t0 = ctx.currentTime + 0.12;
       var ev = result.events;
       if (withCountIn && ui.countIn) {
-        for (var k = 0; k < ev.beatsPerBar; k++) drum('hat', t0 + k * ev.beatSec, k === 0 ? 1.6 : 1.1);
+        for (var k = 0; k < ev.beatsPerBar; k++) engine.drum('hat', t0 + k * ev.beatSec, k === 0 ? 1.6 : 1.1);
         t0 += ev.beatsPerBar * ev.beatSec;
       }
       startAt = t0;
@@ -437,12 +375,17 @@
       timer = setTimeout(function () {
         if (!api.playing) return;
         if (state.loop) {
-          stopNodes();
+          engine.stopAll();
           startPass(current, false);
         } else {
           api.stop();
         }
       }, (t0 - ctx.currentTime + ev.totalSec) * 1000 + 60);
+    }
+
+    function setPlaying(on) {
+      playBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
+      playBtn.lastChild.textContent = on ? ' Parar' : ' Escuchar';
     }
 
     var api = {
@@ -451,33 +394,73 @@
         ensure();
         current = result;
         api.playing = true;
-        startPass(result, true);
-        cancelAnimationFrame(raf);
-        raf = requestAnimationFrame(highlight);
-        playBtn.setAttribute('aria-pressed', 'true');
-        playBtn.lastChild.textContent = ' Parar';
+        setPlaying(true);
+        prepare(result).then(function () {
+          if (!api.playing || current !== result) return;
+          startPass(result, true);
+          cancelAnimationFrame(raf);
+          raf = requestAnimationFrame(highlight);
+        });
       },
       stop: function () {
         api.playing = false;
         clearTimeout(timer);
         cancelAnimationFrame(raf);
-        stopNodes();
+        if (engine) engine.stopAll();
         clearHighlight();
-        playBtn.setAttribute('aria-pressed', 'false');
-        playBtn.lastChild.textContent = ' Escuchar';
+        setPlaying(false);
       },
       restart: function (result) {
-        stopNodes();
         current = result;
-        startPass(result, false);
+        engine.stopAll();
+        clearTimeout(timer);
+        prepare(result).then(function () {
+          if (api.playing && current === result) startPass(result, false);
+        });
+      },
+      // Precarga en segundo plano (solo después de que la persona haya tocado algo).
+      warm: function (result) {
+        if (engine) prepare(result);
+      },
+      settingsChanged: function () {
+        applySettings();
       },
       previewNote: function (midi) {
         ensure();
-        voice(midi, ctx.currentTime + 0.02, 0.5, 0.9, readForm().instrument);
+        var s = samples();
+        engine.preload([{ sample: s.solo, midis: [midi] }]).then(function () {
+          engine.soloNote(s.solo, midi, ctx.currentTime + 0.02, 0.6, 0.9);
+        });
+      },
+      // Frase corta para probar el instrumento y los efectos.
+      audition: function () {
+        ensure();
+        var ui = readForm();
+        var s = samples();
+        var base = S.spellScale(ui.key, ui.scale).notes.map(function (n) { return n.pc; });
+        var start = { grave: 45, medio: 57, agudo: 64 }[ui.register] || 57;
+        var run = [];
+        for (var m = start; run.length < 8; m++) if (base.indexOf(m % 12) >= 0) run.push(m);
+        run = run.concat(run.slice(0, 7).reverse());
+        engine.preload([{ sample: s.solo, midis: run }], function (d, tot) { if (tot) setStatus('Cargando sonidos reales… ' + d + ' de ' + tot, 'loading'); }).then(function () {
+          setStatus('Sonidos reales listos.', 'ok');
+          var t = ctx.currentTime + 0.05;
+          var step = 60 / (Number(ui.tempo) || 100) / 2;
+          run.forEach(function (mm, i) {
+            engine.soloNote(s.solo, mm, t + i * step, i === run.length - 1 ? step * 4 : step * 0.95, i % 4 === 0 ? 1 : 0.8);
+          });
+        });
       },
     };
     return api;
   })();
+
+  function applyPreset(id) {
+    var pr = SE.FX_PRESETS[id];
+    if (!pr) return;
+    var fx = Object.assign({}, SE.FX_DEFAULT, pr.fx);
+    fxToForm(fx);
+  }
 
   // ---------- Eventos ----------
   var regenTimer = null;
@@ -488,6 +471,31 @@
     if (GEN_KEYS.indexOf(name) >= 0) {
       clearTimeout(regenTimer);
       regenTimer = setTimeout(regenerate, 160);
+      if (name === 'tempo') synth.settingsChanged();
+    } else if (/^fx_/.test(name)) {
+      form.elements.soundPreset.value = 'custom';
+      synth.settingsChanged();
+      persist();
+    } else if (name === 'soundPreset') {
+      if (e.target.value !== 'custom') applyPreset(e.target.value);
+      synth.settingsChanged();
+      persist();
+    } else if (name === 'instrument') {
+      var inst = SE.INSTRUMENTS[e.target.value];
+      if (inst) {
+        fxToForm(SE.presetFx(e.target.value));
+        form.elements.soundPreset.value = inst.preset;
+      }
+      synth.settingsChanged();
+      if (state.current) synth.warm(state.current);
+      persist();
+    } else if (name === 'chords' || name === 'bass' || name === 'quality') {
+      synth.settingsChanged();
+      if (state.current) synth.warm(state.current);
+      persist();
+    } else if (name === 'volSolo' || name === 'volBand' || name === 'volDrums') {
+      synth.settingsChanged();
+      persist();
     } else if (name === 'transpose' || name === 'tab') {
       render(state.current);
       persist();
@@ -502,6 +510,13 @@
       setForm({ scale: st.scale, density: st.density, variability: st.variability, rests: st.rests, swing: st.swing, chromatic: st.chromatic, ornaments: st.ornaments, repetition: st.repetition });
       if (st.progression) form.elements.progression.value = S.progressionFor(form.elements.key.value, st.progression);
       else if (data.songProgression) form.elements.progression.value = data.songProgression;
+      // Y el sonido típico del estilo: su guitarra, acompañamiento, bajo y efectos.
+      var snd = SE.STYLE_SOUND[e.target.value];
+      if (snd) {
+        setForm({ instrument: snd.instrument, chords: snd.chords, bass: snd.bass, soundPreset: SE.INSTRUMENTS[snd.instrument].preset });
+        fxToForm(SE.presetFx(snd.instrument));
+        synth.settingsChanged();
+      }
       regenerate();
     }
   });
@@ -533,6 +548,13 @@
     if (!b) return;
     var act = b.dataset.act;
     if (act === 'new') newSolo();
+    if (act === 'audition') synth.audition();
+    if (act === 'resetFx') {
+      fxToForm(SE.presetFx(form.elements.instrument.value));
+      form.elements.soundPreset.value = (SE.INSTRUMENTS[form.elements.instrument.value] || {}).preset || 'limpio';
+      synth.settingsChanged();
+      persist();
+    }
     if (act === 'play') {
       if (synth.playing) synth.stop();
       else synth.play(state.current);
@@ -602,7 +624,18 @@
       try { fromLink = JSON.parse(decodeURIComponent(escape(atob(decodeURIComponent(m[1]))))); } catch (e) { fromLink = null; }
     }
     var stored = load('.history', null);
-    var ui = Object.assign({}, UI_DEFAULTS, load('.ui', {}));
+    var storedUi = load('.ui', {});
+    if (storedUi.instrument && !SEN.INSTRUMENTS[storedUi.instrument]) delete storedUi.instrument;
+    var ui = Object.assign({}, UI_DEFAULTS, storedUi);
+    if (!storedUi.instrument) {
+      // Primera vez: sonido del estilo por defecto.
+      var snd0 = SEN.STYLE_SOUND[(data.defaults && data.defaults.style) || 'rock'];
+      if (snd0) {
+        ui.instrument = snd0.instrument; ui.chords = snd0.chords; ui.bass = snd0.bass; ui.soundPreset = SEN.INSTRUMENTS[snd0.instrument].preset;
+        var fx0 = SEN.presetFx(snd0.instrument);
+        Object.keys(fx0).forEach(function (k) { ui['fx_' + k] = fx0[k]; });
+      }
+    }
     if (fromLink) {
       setForm(Object.assign({}, data.defaults, ui, fromLink));
       state.history = stored && stored.history ? stored.history : [];

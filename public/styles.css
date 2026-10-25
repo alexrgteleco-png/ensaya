@@ -606,3 +606,10 @@ details.help p { margin: 8px 0; }
 .sg-title-label { display: grid; gap: 4px; font-weight: 700; font-size: 0.9rem; flex: 1 1 240px; }
 kbd { font-family: var(--font-mono); font-size: 0.85em; border: 1px solid var(--staff); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; background: var(--surface); }
 @media print { .sg-controls, .sg-bar, .sg-actions, .sg-meta + p, .sg-output > p.muted { display: none !important; } .sg { display: block; } .sg-score { border: 0; } }
+.sg-status { margin: 0; color: var(--ink-soft); }
+.sg-status.loading { color: var(--cobalt); }
+.sg-status.ok { color: var(--green); }
+.sg-status.warn { color: var(--red); }
+.sg-inline-actions { margin: 0; }
+.sg-eq .sg-slider-head { flex-direction: column; gap: 0; }
+.sg-controls optgroup { font-weight: 700; }

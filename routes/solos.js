@@ -8,6 +8,7 @@ const { html, raw } = require('../lib/html');
 const { HttpError } = require('../lib/http');
 const { layout, icon, jsonData } = require('../lib/ui');
 const S = require('../public/solo-engine');
+const SE = require('../public/sound-engine');
 const { str, loadGroup, loadSong } = require('./common');
 
 function defaultsForSong(song) {
@@ -119,14 +120,53 @@ module.exports = function soloRoutes(app) {
             </div>
           </fieldset>
           <fieldset>
-            <legend>Sonido y partitura</legend>
+            <legend>Instrumento</legend>
+            <label>Instrumento del solo
+              <select name="instrument">
+                ${['Guitarras', 'Pianos y teclados', 'Vientos y otros'].map((grp) => html`<optgroup label="${grp}">${Object.entries(SE.INSTRUMENTS).filter(([, v]) => v.group === grp).map(([k, v]) => html`<option value="${k}">${v.name}</option>`)}</optgroup>`)}
+              </select>
+            </label>
             <div class="grid-2">
-              ${select('instrument', 'Instrumento', [['guitarra', 'Guitarra eléctrica'], ['saxo', 'Saxo'], ['synth', 'Sintetizador'], ['piano', 'Piano']])}
-              ${select('transpose', 'Partitura para', [['0', 'Instrumento en Do'], ['2', 'Si♭ (trompeta, clarinete, saxo tenor)'], ['9', 'Mi♭ (saxo alto)'], ['7', 'Fa (trompa)']])}
+              ${select('soundPreset', 'Sonido', [...Object.entries(SE.FX_PRESETS).map(([k, v]) => [k, v.name]), ['custom', 'Personalizado']])}
+              ${select('quality', 'Calidad', [['alta', 'Alta'], ['ligera', 'Ligera (carga antes)']])}
+            </div>
+            <p class="actions sg-inline-actions">
+              <button type="button" class="button button-small" data-act="audition">${icon('play', 14)} Probar sonido</button>
+              <button type="button" class="button button-small button-ghost" data-act="resetFx">Restablecer efectos</button>
+            </p>
+            <p class="sg-status small" data-sound-status role="status">Los sonidos reales se descargan al escuchar por primera vez.</p>
+          </fieldset>
+          <fieldset>
+            <legend>Efectos</legend>
+            ${slider('fx_drive', 'Saturación / distorsión', 0, 100, 1, '')}
+            <div class="grid-3 sg-eq">
+              ${slider('fx_bass', 'Graves', -12, 12, 1, '')}
+              ${slider('fx_mid', 'Medios', -12, 12, 1, '')}
+              ${slider('fx_treble', 'Agudos', -12, 12, 1, '')}
+            </div>
+            ${slider('fx_comp', 'Compresión', 0, 100, 1, 'Iguala el volumen y alarga las notas')}
+            ${slider('fx_chorus', 'Chorus', 0, 100, 1, 'Sonido más ancho y brillante')}
+            ${slider('fx_delayMix', 'Delay (eco)', 0, 100, 1, '')}
+            ${select('fx_delayTime', 'Tiempo del delay', [['1/4', 'Negra'], ['1/8', 'Corchea'], ['1/8d', 'Corchea con puntillo'], ['1/16', 'Semicorchea'], ['1/4t', 'Tresillo de blanca']])}
+            ${slider('fx_delayFeedback', 'Repeticiones del delay', 0, 90, 1, '')}
+            ${select('fx_reverbType', 'Tipo de reverb', Object.entries(SE.REVERBS).map(([k, v]) => [k, v.name]))}
+            ${slider('fx_reverbMix', 'Cantidad de reverb', 0, 100, 1, '')}
+            ${slider('fx_vibrato', 'Vibrato', 0, 100, 1, '')}
+            ${slider('fx_sustain', 'Sustain (cola de las notas)', 0, 100, 1, '')}
+            ${slider('fx_pan', 'Panorama', -100, 100, 1, '')}
+            ${slider('fx_humanize', 'Humanización', 0, 100, 1, 'Pequeñas variaciones de tiempo y fuerza, como al tocar en vivo')}
+            <p class="muted small">El delay va sincronizado con el tempo del solo.</p>
+          </fieldset>
+          <fieldset>
+            <legend>Acompañamiento y partitura</legend>
+            <div class="grid-2">
+              ${select('chords', 'Acordes', Object.entries(SE.CHORD_INSTRUMENTS).map(([k, v]) => [k, v.name]))}
+              ${select('bass', 'Bajo', Object.entries(SE.BASS_INSTRUMENTS).map(([k, v]) => [k, v.name]))}
             </div>
             ${slider('volSolo', 'Volumen del solo', 0, 100, 1, '')}
             ${slider('volBand', 'Acordes y bajo', 0, 100, 1, '')}
-            ${slider('volDrums', 'Batería', 0, 100, 1, '')}
+            ${slider('volDrums', 'Batería (palmas en flamenco)', 0, 100, 1, '')}
+            ${select('transpose', 'Partitura para', [['0', 'Instrumento en Do'], ['2', 'Si♭ (trompeta, clarinete, saxo tenor)'], ['9', 'Mi♭ (saxo alto)'], ['7', 'Fa (trompa)']])}
             <label class="check"><input type="checkbox" name="tab"> Mostrar tablatura de guitarra</label>
             <label class="check"><input type="checkbox" name="countIn"> Compás de cuenta antes de empezar</label>
           </fieldset>
@@ -152,10 +192,10 @@ module.exports = function soloRoutes(app) {
             <button type="button" class="button button-ghost" data-act="link">Copiar enlace a este solo</button>
             <button type="button" class="button button-ghost" data-act="print">Imprimir</button>
           </div>
-          <p class="muted small">Atajos: <kbd>N</kbd> nuevo solo, <kbd>espacio</kbd> escuchar o parar. El enlace reproduce exactamente este solo en el móvil de tus compañeros. Pulsa una nota de la partitura para oírla.</p>
+          <p class="muted small">Atajos: <kbd>N</kbd> nuevo solo, <kbd>espacio</kbd> escuchar o parar. El enlace reproduce exactamente este solo en el móvil de tus compañeros. Pulsa una nota de la partitura para oírla. Sonidos: bancos MusyngKite y FluidR3 GM (Creative Commons), descargados de GitHub Pages.</p>
         </section>
       </div>`;
-    res.html(layout(res.ctx, { title: `Generador de solos · ${song.title}`, active: 'repertorio', scripts: ['/vendor/abcjs-basic-min.js', '/solo-engine.js', '/solos.js'], body }));
+    res.html(layout(res.ctx, { title: `Generador de solos · ${song.title}`, active: 'repertorio', scripts: ['/vendor/abcjs-basic-min.js', '/solo-engine.js', '/sound-engine.js', '/solos.js'], body }));
   });
 
   app.post('/api/g/:gid/canciones/:sid/solos', { bodyLimit: 256 * 1024 }, loadGroup, async (req, res) => {

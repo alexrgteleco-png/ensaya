@@ -24,7 +24,7 @@ ensayos, setlists y modo escenario.
 | Agenda: calendario mensual, ensayos y conciertos, asistencia, canciones a trabajar, objetivos, notas tras el ensayo, exportar a calendario (.ics) | Miembros |
 | Setlists: añadir canciones, descansos y textos, ordenar arrastrando o con flechas, tono y nota por canción, duración total, duplicar, imprimir | Miembros |
 | Modo escenario: letras y acordes a pantalla completa, pedal o flechas, transposición en vivo, tamaño de letra, desplazamiento automático, tema claro/oscuro y uso **sin conexión** | Miembros |
-| Generador de solos por canción: estilo (rock, blues, jazz, funk, flamenco, metal, balada, pop), tonalidad, 12 escalas, tempo, compás, densidad, silencios, swing, variabilidad, repetición de motivos, seguimiento de acordes, cromatismos, adornos, registro; partitura y tablatura, sonido con acordes, bajo y batería, historial, enlace reproducible, MIDI y guardar como partitura | Miembros |
+| Generador de solos por canción: estilo (rock, blues, jazz, funk, flamenco, metal, balada, pop), tonalidad, 12 escalas, tempo, compás, densidad, silencios, swing, variabilidad, repetición de motivos, seguimiento de acordes, cromatismos, adornos, registro; partitura y tablatura, sonido con muestras de instrumentos reales (9 guitarras, una por estilo, 10 pianos y teclados, vientos), efectos (saturación, ecualizador, compresor, chorus, delay sincronizado, reverb, vibrato, sustain, panorama, humanización) y acompañamiento real de acordes y bajo; historial, enlace reproducible, MIDI y guardar como partitura | Miembros |
 | Afinador cromático y metrónomo | Miembros |
 | Borrar canciones, archivos, partituras, eventos o setlists | Quien los creó o quien creó el grupo |
 
@@ -91,4 +91,4 @@ UTC y se muestran en hora de España (`APP_TIMEZONE`, por defecto `Europe/Madrid
 ## Librerías de cliente incluidas
 
 En `public/vendor/`: [abcjs](https://github.com/paulrosen/abcjs) (MIT), [OpenSheetMusicDisplay](https://github.com/opensheetmusicdisplay/opensheetmusicdisplay) (BSD-3) y [PDF.js](https://github.com/mozilla/pdf.js) (Apache-2.0).
-La reproducción del editor descarga los sonidos de instrumentos de `paulrosen.github.io`.
+La reproducción del editor y del generador de solos descarga las muestras de instrumentos (bancos MusyngKite y FluidR3 GM, licencias Creative Commons BY-SA 3.0 y BY 3.0) desde `paulrosen.github.io`, directamente al navegador: no consumen tráfico de Render ni de R2.
