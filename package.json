@@ -1,0 +1,17 @@
+{
+  "name": "ensaya",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Ensaya: repertorio, partituras, ensayos, setlists y modo escenario para grupos de música. Una app de theaipeoplehub.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test/"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "postgres": "^3.4.9"
+  }
+}
