@@ -6,7 +6,7 @@ const path = require('path');
 const { App, HttpError } = require('./lib/http');
 const { sql, migrate } = require('./lib/db');
 const { createSessionMiddleware } = require('./lib/session');
-const { mountAuthRoutes, loginUrl } = require('./lib/oidc');
+const { mountAuthRoutes, loginUrl, wakeIdentityProvider } = require('./lib/oidc');
 const { csrfToken, verifyCsrf, securityHeaders } = require('./lib/security');
 const { layout, pageHead } = require('./lib/ui');
 const { html } = require('./lib/html');
@@ -37,6 +37,13 @@ app.use(
 );
 app.static('/', path.join(__dirname, 'public'), { maxAge: 3600 });
 
+// Cualquier visita a una página (no a los recursos estáticos) despierta a Keycloak en segundo plano.
+app.use((req, res, next) => {
+  // Solo si no hay sesión (quien ya ha entrado no necesita a Keycloak hasta que sale).
+  if (req.method === 'GET' && !req.cookies.sid) wakeIdentityProvider();
+  return next();
+});
+
 app.get('/healthz', (req, res) => res.text('ok'));
 
 app.use(createSessionMiddleware({ secret: process.env.SESSION_SECRET || 'solo-para-desarrollo-local', secure: isProduction }));
@@ -59,18 +66,21 @@ app.use((req, res, next) => {
 
 app.use(verifyCsrf);
 
-function renderError(req, res, status, message, { retryLogin = false } = {}) {
+function renderError(req, res, status, message, { retryLogin = false, waking = false, retryUrl = '', title: customTitle = '' } = {}) {
   const ctx = res.ctx || { user: null, path: req.originalUrl, csrf: '', flash: null };
   const titles = { 400: 'Algo no cuadra', 401: 'Tienes que entrar', 403: 'Sin acceso', 404: 'No encontrado', 405: 'No permitido', 413: 'Demasiado grande', 503: 'No disponible', 507: 'Sin espacio' };
-  const title = titles[status] || 'Ha fallado algo';
+  const title = customTitle || titles[status] || 'Ha fallado algo';
   return res.html(
     layout(ctx, {
       title,
+      refresh: waking && retryUrl ? { seconds: 6, url: retryUrl } : null,
       body: html`<section class="narrow">
         ${pageHead(title, { lead: message })}
+        ${waking ? html`<p class="waking" role="status"><span class="waking-dots" aria-hidden="true"><i></i><i></i><i></i></span> Reintentando…</p>` : ''}
         <p class="actions">
+          ${retryUrl ? html`<a class="button" href="${retryUrl}">Reintentar ahora</a>` : ''}
           ${retryLogin ? html`<a class="button" href="/login">Entrar de nuevo</a>` : ''}
-          <a class="button button-ghost" href="/">Ir a mis grupos</a>
+          <a class="button button-ghost" href="/">Volver al inicio</a>
         </p>
       </section>`,
     }),
