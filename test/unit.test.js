@@ -56,3 +56,28 @@ test('URL firmada coincide con el ejemplo oficial de AWS (presigned GET)', () =>
   });
   assert.strictEqual(signature, 'aeeed9bbccd4d02ee5c0109b86d86835f995330da4c265957d157751f604d404');
 });
+
+test('cifrado por compases: formato de la IA, iReal sin corchetes y transposición', () => {
+  const C = require('../public/chordpro');
+  const fs = require('fs');
+  const text = fs.readFileSync(require('path').join(__dirname, 'estate.chart'), 'utf8');
+  const bars = C.bars(text);
+  assert.strictEqual(bars.length, 28);
+  assert.deepStrictEqual(bars.slice(0, 4), [['Bm-7'], ['Bm-7'], ['Em-7'], ['F#7b9']]);
+  assert.match(C.render(text, 0, { key: 'Bm' }), /B♭7♭9/);
+  assert.match(C.render(text, 1, { key: 'Bm' }), /Cm7/);
+  assert.strictEqual(C.normalizeChart('```\nBm7 | % | Em7 A7 |\n```'), '[Bm7] | [%] | [Em7] [A7] |');
+  assert.strictEqual(C.prettyChord('C^7'), 'Cmaj7');
+  assert.strictEqual(C.prettyChord('Eb-6'), 'E♭m6');
+  const m = C.meta('{title: Estate}\n{key: Bm}\n{tempo: 130}\n[Bm7] |');
+  assert.deepStrictEqual([m.title, m.key, m.tempo], ['Estate', 'Bm', '130']);
+});
+
+test('editor sencillo: notas a ABC con compases y ligaduras automáticas', () => {
+  const M = require('../public/melody-model');
+  const r = M.toAbc({ key: 'F', meter: '3/4', tempo: 90, chords: [{ tick: 0, name: 'F' }, { tick: 12, name: 'C7' }], notes: [{ midi: 65, ticks: 8 }, { midi: 70, ticks: 8 }, { midi: null, ticks: 4 }, { midi: 69, ticks: 4 }] }, 'Prueba', { aheadBars: 0 });
+  assert.match(r.abc, /K:F\n/);
+  assert.match(r.abc, /"F"F8 B4- \| "C7"B4 z4 A4 \|\]/);
+  assert.strictEqual(r.pieces.filter((p) => p.note === 1).length, 2, 'la nota ligada son dos figuras');
+  assert.deepStrictEqual(M.chordsFromBars([['Dm7', 'G7'], ['C']], '4/4'), [{ tick: 0, name: 'Dm7' }, { tick: 8, name: 'G7' }, { tick: 16, name: 'C' }]);
+});

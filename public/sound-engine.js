@@ -24,6 +24,7 @@
     crunch: { name: 'Crunch (blues)', fx: { drive: 35, bass: 2, mid: 3, treble: 1, comp: 30, chorus: 0, delayMix: 10, delayTime: '1/8', delayFeedback: 25, reverbType: 'habitacion', reverbMix: 22, vibrato: 25, sustain: 55 } },
     lead_rock: { name: 'Solo de rock', fx: { drive: 55, bass: 1, mid: 4, treble: 2, comp: 45, chorus: 0, delayMix: 22, delayTime: '1/8d', delayFeedback: 35, reverbType: 'sala', reverbMix: 25, vibrato: 35, sustain: 70 } },
     metal: { name: 'Metal', fx: { drive: 80, bass: 4, mid: -3, treble: 3, comp: 60, chorus: 0, delayMix: 12, delayTime: '1/16', delayFeedback: 20, reverbType: 'sala', reverbMix: 15, vibrato: 20, sustain: 70 } },
+    bossa: { name: 'Bossa (cálido y cercano)', fx: { drive: 0, bass: 1, mid: 0, treble: -2, comp: 25, chorus: 0, delayMix: 0, reverbType: 'habitacion', reverbMix: 22, vibrato: 0, sustain: 55 } },
     jazz: { name: 'Jazz cálido', fx: { drive: 0, bass: 3, mid: 1, treble: -5, comp: 25, chorus: 0, delayMix: 0, reverbType: 'habitacion', reverbMix: 20, vibrato: 0, sustain: 45 } },
     funk: { name: 'Funk', fx: { drive: 0, bass: -2, mid: 2, treble: 4, comp: 70, chorus: 25, delayMix: 0, reverbType: 'habitacion', reverbMix: 10, vibrato: 0, sustain: 30 } },
     flamenco: { name: 'Flamenco seco', fx: { drive: 0, bass: 1, mid: 2, treble: 2, comp: 30, chorus: 0, delayMix: 0, reverbType: 'habitacion', reverbMix: 14, vibrato: 0, sustain: 45 } },
@@ -43,6 +44,7 @@
     gtr_flamenco: { name: 'Guitarra española (flamenco)', group: 'Guitarras', sample: 'acoustic_guitar_nylon', preset: 'flamenco', style: 'flamenco', range: [40, 84] },
     gtr_metal: { name: 'Guitarra metal (distorsionada)', group: 'Guitarras', sample: 'distortion_guitar', preset: 'metal', style: 'metal', range: [40, 90] },
     gtr_acoustic: { name: 'Guitarra acústica (cuerdas de acero)', group: 'Guitarras', sample: 'acoustic_guitar_steel', preset: 'ambiente', style: 'balada', range: [40, 84] },
+    gtr_bossa: { name: 'Guitarra de bossa nova (nailon)', group: 'Guitarras', sample: 'acoustic_guitar_nylon', preset: 'bossa', style: 'bossa', range: [40, 84] },
     gtr_pop: { name: 'Guitarra eléctrica pop (limpia con chorus)', group: 'Guitarras', sample: 'electric_guitar_clean', preset: 'limpio', style: 'pop', range: [40, 88], fx: { chorus: 30, delayMix: 12 } },
     pno_grand: { name: 'Piano de cola', group: 'Pianos y teclados', sample: 'acoustic_grand_piano', preset: 'piano_sala', range: [21, 108] },
     pno_bright: { name: 'Piano brillante (pop y rock)', group: 'Pianos y teclados', sample: 'bright_acoustic_piano', preset: 'piano_sala', range: [21, 108] },
@@ -86,13 +88,16 @@
 
   // Instrumentos por defecto para cada estilo del generador.
   var STYLE_SOUND = {
+    bossa: { instrument: 'gtr_bossa', chords: 'gtr_nylon', bass: 'bass_upright' },
+    swing: { instrument: 'gtr_jazz', chords: 'pno_grand', bass: 'bass_upright' },
+    bebop: { instrument: 'gtr_jazz', chords: 'pno_grand', bass: 'bass_upright' },
     rock: { instrument: 'gtr_rock', chords: 'pno_bright', bass: 'bass_pick' },
     blues: { instrument: 'gtr_blues', chords: 'org_hammond', bass: 'bass_finger' },
     jazz: { instrument: 'gtr_jazz', chords: 'pno_rhodes', bass: 'bass_upright' },
     funk: { instrument: 'gtr_funk', chords: 'pno_rhodes', bass: 'bass_finger' },
     flamenco: { instrument: 'gtr_flamenco', chords: 'gtr_nylon', bass: 'bass_upright' },
     metal: { instrument: 'gtr_metal', chords: 'gtr_clean', bass: 'bass_pick' },
-    balada: { instrument: 'gtr_acoustic', chords: 'pno_grand', bass: 'bass_fretless' },
+    balada: { instrument: 'gtr_jazz', chords: 'pno_rhodes', bass: 'bass_upright', preset: 'ambiente' },
     pop: { instrument: 'gtr_pop', chords: 'pno_bright', bass: 'bass_finger' },
   };
 
@@ -526,6 +531,38 @@
         });
         g.gain.setValueAtTime(0.4 * vel, t + 0.03);
         g.gain.exponentialRampToValueAtTime(0.0001, t + 0.15);
+      } else if (type === 'rim') {
+        // Golpe de aro (bossa): clic corto y agudo con algo de cuerpo.
+        f.type = 'bandpass';
+        f.frequency.value = 2600;
+        f.Q.value = 6;
+        g.gain.setValueAtTime(0.5 * vel, t);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + 0.05);
+        var click = track(ctx.createOscillator());
+        var cg = track(ctx.createGain());
+        click.type = 'triangle';
+        click.frequency.setValueAtTime(1700, t);
+        cg.gain.setValueAtTime(0.18 * vel, t);
+        cg.gain.exponentialRampToValueAtTime(0.0001, t + 0.03);
+        click.connect(cg);
+        cg.connect(drumBus);
+        click.start(t);
+        click.stop(t + 0.05);
+      } else if (type === 'shaker') {
+        f.type = 'bandpass';
+        f.frequency.value = 6500;
+        f.Q.value = 1.5;
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.exponentialRampToValueAtTime(0.09 * vel, t + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + 0.09);
+      } else if (type === 'brush') {
+        // Escobillas: barrido suave.
+        f.type = 'bandpass';
+        f.frequency.value = 3500;
+        f.Q.value = 0.6;
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.exponentialRampToValueAtTime(0.07 * vel, t + 0.06);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + 0.32);
       } else if (type === 'ride') {
         f.type = 'highpass';
         f.frequency.value = 5200;

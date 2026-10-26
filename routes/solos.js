@@ -11,33 +11,32 @@ const S = require('../public/solo-engine');
 const SE = require('../public/sound-engine');
 const { str, loadGroup, loadSong } = require('./common');
 
-function defaultsForSong(song) {
-  const m = /^(Do|Re|Mi|Fa|Sol|La|Si|[A-G])([#b]?)(m(?!aj))?/.exec(song.song_key || '');
-  const latin = { Do: 'C', Re: 'D', Mi: 'E', Fa: 'F', Sol: 'G', La: 'A', Si: 'B' };
-  let key = 'A';
-  let minor = true;
-  if (m) {
-    key = (latin[m[1]] || m[1]) + (m[2] || '');
-    minor = Boolean(m[3]);
-    if (!S.ROOTS.includes(key)) key = { 'D#': 'Eb', 'G#': 'Ab', 'A#': 'Bb' }[key] || 'A';
-  }
-  const meter = ['4/4', '3/4', '2/4', '6/8', '12/8'].includes(song.time_signature) ? song.time_signature : '4/4';
-  const style = S.STYLES.rock;
+const ChordPro = require('../public/chordpro');
+
+const KEY_ROOTS = ['C', 'C#', 'Db', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'Ab', 'A', 'Bb', 'B'];
+const LATIN = { C: 'Do', 'C#': 'Do#', Db: 'Re♭', D: 'Re', Eb: 'Mi♭', E: 'Mi', F: 'Fa', 'F#': 'Fa#', G: 'Sol', Ab: 'La♭', A: 'La', Bb: 'Si♭', B: 'Si' };
+const STYLE_ORDER = ['bossa', 'swing', 'balada', 'bebop', 'blues', 'pop', 'rock', 'funk', 'flamenco', 'metal'];
+
+function songKey(song) {
+  const k = S.parseKey(song.song_key || 'C');
+  const root = k.name.replace(/m$/, '');
+  const fixed = { 'D#': 'Eb', 'G#': 'Ab', 'A#': 'Bb', Gb: 'F#', Cb: 'B' }[root] || root;
+  return fixed + (k.minor ? 'm' : '');
+}
+
+function defaultsForSong(song, form, meta) {
+  const style = S.styleFromName(meta.style) || (form.length ? 'swing' : 'rock');
+  const meter = ['4/4', '3/4', '2/4', '5/4', '6/8', '12/8'].includes(song.time_signature) ? song.time_signature : '4/4';
   return {
     ...S.DEFAULTS,
-    style: 'rock',
-    key,
-    scale: minor ? 'pentatonica_menor' : 'pentatonica_mayor',
-    tempo: song.bpm || 100,
+    ...S.paramsFor(style, 'medio'),
+    level: 'medio',
+    key: songKey(song),
+    tempo: song.bpm || (style === 'balada' ? 70 : style === 'bossa' ? 130 : 120),
     meter,
-    density: style.density,
-    variability: style.variability,
-    rests: style.rests,
-    swing: style.swing,
-    chromatic: style.chromatic,
-    ornaments: style.ornaments,
-    repetition: style.repetition,
-    progression: S.chordsFromLyrics(song.lyrics),
+    useSong: form.length > 0,
+    bars: style === 'blues' ? 12 : 8,
+    choruses: form.length && form.length <= 16 ? 2 : 1,
   };
 }
 
@@ -53,162 +52,223 @@ function select(name, label, options) {
   return html`<label>${label}<select name="${name}">${options.map(([v, t]) => html`<option value="${v}">${t}</option>`)}</select></label>`;
 }
 
+function instrumentSelect() {
+  return html`<select name="instrument" aria-label="Instrumento">
+    ${['Guitarras', 'Pianos y teclados', 'Vientos y otros'].map((grp) => html`<optgroup label="${grp}">${Object.entries(SE.INSTRUMENTS).filter(([, v]) => v.group === grp).map(([k, v]) => html`<option value="${k}">${v.name}</option>`)}</optgroup>`)}
+  </select>`;
+}
+
+// Notas de una melodía en JSON (validadas y limitadas).
+function cleanModel(m) {
+  if (!m || typeof m !== 'object' || !Array.isArray(m.notes)) return null;
+  const num = (v, a, b) => (Number.isFinite(Number(v)) ? Math.min(b, Math.max(a, Number(v))) : null);
+  const notes = m.notes.slice(0, 4000).map((n) => ({
+    tick: num(n.tick, 0, 1e6) || 0,
+    ticks: num(n.ticks, 0.1, 1e4) || 1,
+    midi: n.midi === null || n.midi === undefined ? null : num(n.midi, 0, 127),
+    tuplet: [0, 3, 6].includes(Number(n.tuplet)) ? Number(n.tuplet) : 0,
+  }));
+  const chords = Array.isArray(m.chords) ? m.chords.slice(0, 1000).map((c) => ({ tick: num(c.tick, 0, 1e6) || 0, name: String(c.name || '').slice(0, 20) })) : [];
+  return {
+    kind: m.kind === 'solo' ? 'solo' : 'melody',
+    key: String(m.key || 'C').slice(0, 8),
+    meter: /^\d{1,2}\/\d{1,2}$/.test(m.meter) ? m.meter : '4/4',
+    tempo: num(m.tempo, 30, 300) || 100,
+    chords,
+    notes,
+  };
+}
+
 module.exports = function soloRoutes(app) {
   app.get('/g/:gid/canciones/:sid/solos', loadGroup, async (req, res) => {
     const g = req.group;
     const song = await loadSong(req, req.params.sid);
+    const form = ChordPro.bars(song.lyrics || '').slice(0, 128);
+    const meta = ChordPro.meta(song.lyrics || '');
+    const [melody] = await sql`
+      SELECT model FROM scores WHERE song_id = ${song.id} AND model IS NOT NULL AND model->>'kind' = 'melody'
+      ORDER BY updated_at DESC LIMIT 1`;
+    const theme = melody && melody.model && Array.isArray(melody.model.notes) ? melody.model.notes.filter((n) => n.midi).map((n) => ({ tick: n.tick, ticks: n.ticks, midi: n.midi })).slice(0, 2000) : null;
     const data = {
       song: { id: song.id, title: song.title },
-      defaults: defaultsForSong(song),
+      defaults: defaultsForSong(song, form, meta),
+      form,
+      theme,
       songProgression: S.chordsFromLyrics(song.lyrics),
       save: `/api/g/${g.id}/canciones/${song.id}/solos`,
-      styles: Object.fromEntries(Object.entries(S.STYLES).map(([k, v]) => [k, { scale: v.scale, density: v.density, variability: v.variability, rests: v.rests, swing: v.swing, chromatic: v.chromatic, ornaments: v.ornaments, repetition: v.repetition, progression: v.progression || '' }])),
     };
-    const roots = ['C', 'C#', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'Ab', 'A', 'Bb', 'B'];
-    const latin = { C: 'Do', 'C#': 'Do#', D: 'Re', Eb: 'Mib', E: 'Mi', F: 'Fa', 'F#': 'Fa#', G: 'Sol', Ab: 'Lab', A: 'La', Bb: 'Sib', B: 'Si' };
+    const keyOptions = [];
+    KEY_ROOTS.forEach((r) => keyOptions.push([r, `${r} mayor (${LATIN[r]})`]));
+    KEY_ROOTS.forEach((r) => keyOptions.push([`${r}m`, `${r} menor (${LATIN[r]}m)`]));
     const body = html`
       ${jsonData('solo-data', data)}
-      <div class="pagehead">
+      <div class="pagehead sg-head">
         <div>
           <p class="crumbs"><a href="/g/${g.id}/canciones/${song.id}">${song.title}</a></p>
           <h1>Generador de solos</h1>
-          <p class="lead">Ajusta el estilo y los parámetros; cada solo es nuevo, pero puedes volver a los anteriores, escucharlo con acompañamiento y guardarlo como partitura.</p>
+          <p class="lead">${form.length
+            ? `Improvisa sobre el cifrado de la canción (${form.length} compases, ${data.defaults.key}).`
+            : 'La canción no tiene cifrado: se usa una progresión típica del estilo. Añade el cifrado para improvisar sobre sus acordes.'}</p>
+        </div>
+        <div class="sg-mode" role="group" aria-label="Modo">
+          <button type="button" class="seg-btn" data-mode-btn="principiante" aria-pressed="true">Principiante</button>
+          <button type="button" class="seg-btn" data-mode-btn="experto" aria-pressed="false">Experto</button>
         </div>
       </div>
-      <div class="sg" data-solo-generator>
+      <div class="sg" data-solo-generator data-mode="principiante">
         <form class="sg-controls" data-controls autocomplete="off">
-          <fieldset>
-            <legend>Base</legend>
-            <div class="grid-2">
-              ${select('style', 'Estilo', Object.entries(S.STYLES).map(([k, v]) => [k, v.name]))}
-              ${select('key', 'Tonalidad', roots.map((r) => [r, `${r} (${latin[r]})`]))}
+          <section class="sg-quick">
+            <div class="sg-styles" role="radiogroup" aria-label="Estilo">
+              ${STYLE_ORDER.map((k) => html`<label class="chip-radio"><input type="radio" name="style" value="${k}"><span>${S.STYLES[k].name}</span></label>`)}
             </div>
-            ${select('scale', 'Escala', Object.entries(S.SCALES).map(([k, v]) => [k, v.name]))}
-            <div class="grid-3">
-              <label>Tempo<input type="number" name="tempo" min="40" max="260" step="1"></label>
-              ${select('meter', 'Compás', [['4/4', '4/4'], ['3/4', '3/4'], ['2/4', '2/4'], ['6/8', '6/8'], ['12/8', '12/8']])}
-              ${select('bars', 'Compases', [[2, 2], [4, 4], [8, 8], [12, 12], [16, 16]].map(([a, b]) => [a, `${b}`]))}
+            <div class="sg-quick-row">
+              <label class="sg-inst">Instrumento ${instrumentSelect()}</label>
+              <fieldset class="sg-level beginner-only">
+                <legend>Dificultad</legend>
+                <div class="seg-mini">
+                  ${Object.entries(S.LEVELS).map(([k, v]) => html`<label><input type="radio" name="level" value="${k}"><span>${v.name}</span></label>`)}
+                </div>
+              </fieldset>
             </div>
-          </fieldset>
-          <fieldset>
-            <legend>Ritmo</legend>
-            ${slider('density', 'Densidad de notas', 1, 10, 1, 'De notas largas a ráfagas rápidas')}
-            ${slider('rests', 'Silencios', 0, 70, 1, 'Respiraciones entre frases')}
-            ${slider('swing', 'Swing', 0, 100, 1, 'Corcheas desiguales, sensación de tresillo')}
-          </fieldset>
-          <fieldset>
-            <legend>Melodía</legend>
-            ${slider('variability', 'Variabilidad', 0, 100, 1, 'Bajo: por grados conjuntos. Alto: saltos amplios')}
-            ${slider('repetition', 'Repetición de motivos', 0, 100, 1, 'Frases que vuelven, pregunta y respuesta')}
-            ${slider('chordFollow', 'Seguir los acordes', 0, 100, 1, 'Caer en notas del acorde en los pulsos fuertes')}
-            ${slider('chromatic', 'Cromatismos', 0, 60, 1, 'Notas de aproximación fuera de la escala')}
-            ${slider('ornaments', 'Adornos', 0, 80, 1, 'Notas de adorno, ligados y deslizamientos')}
-            <div class="grid-2">
-              ${select('register', 'Registro', [['grave', 'Grave'], ['medio', 'Medio'], ['agudo', 'Agudo']])}
-              ${select('range', 'Amplitud', [[1, '1 octava'], [2, '2 octavas'], [3, '3 octavas']])}
+            <div class="sg-bar">
+              <button type="button" class="button" data-act="inspire" title="Parámetros elegidos para que suene bonito">${icon('spark', 18)} Inspírame</button>
+              <button type="button" class="button button-ghost" data-act="new" title="Otro solo con los mismos ajustes (N)">${icon('plus', 16)} Otro solo</button>
+              <button type="button" class="button button-play" data-act="play" aria-pressed="false" title="Escuchar (espacio)">${icon('play', 16)} Escuchar</button>
+              <button type="button" class="button button-ghost button-small" data-act="loop" aria-pressed="false">Bucle</button>
+              <span class="sg-history">
+                <button type="button" class="button button-icon" data-act="prev" aria-label="Solo anterior">‹</button>
+                <output data-history-pos>1 / 1</output>
+                <button type="button" class="button button-icon" data-act="next" aria-label="Solo siguiente">›</button>
+              </span>
             </div>
-            <label class="check"><input type="checkbox" name="endOnTonic"> Terminar en la tónica</label>
-          </fieldset>
-          <fieldset>
-            <legend>Acordes</legend>
-            <label>Progresión <span class="hint">un acorde por compás; se repite si hay menos</span>
-              <input name="progression" maxlength="200" placeholder="Am F C G">
-            </label>
-            <div class="sg-presets" role="group" aria-label="Progresiones">
-              ${data.songProgression ? html`<button type="button" class="button button-small button-ghost" data-prog="song">De la canción</button>` : ''}
-              ${Object.entries(S.PROGRESSIONS).map(([k, v]) => html`<button type="button" class="button button-small button-ghost" data-prog="${k}">${v.name}</button>`)}
-            </div>
-          </fieldset>
-          <fieldset>
-            <legend>Instrumento</legend>
-            <label>Instrumento del solo
-              <select name="instrument">
-                ${['Guitarras', 'Pianos y teclados', 'Vientos y otros'].map((grp) => html`<optgroup label="${grp}">${Object.entries(SE.INSTRUMENTS).filter(([, v]) => v.group === grp).map(([k, v]) => html`<option value="${k}">${v.name}</option>`)}</optgroup>`)}
-              </select>
-            </label>
-            <div class="grid-2">
-              ${select('soundPreset', 'Sonido', [...Object.entries(SE.FX_PRESETS).map(([k, v]) => [k, v.name]), ['custom', 'Personalizado']])}
-              ${select('quality', 'Calidad', [['alta', 'Alta'], ['ligera', 'Ligera (carga antes)']])}
-            </div>
-            <p class="actions sg-inline-actions">
-              <button type="button" class="button button-small" data-act="audition">${icon('play', 14)} Probar sonido</button>
-              <button type="button" class="button button-small button-ghost" data-act="resetFx">Restablecer efectos</button>
-            </p>
-            <p class="sg-status small" data-sound-status role="status">Los sonidos reales se descargan al escuchar por primera vez.</p>
-          </fieldset>
-          <fieldset>
-            <legend>Efectos</legend>
-            ${slider('fx_drive', 'Saturación / distorsión', 0, 100, 1, '')}
-            <div class="grid-3 sg-eq">
-              ${slider('fx_bass', 'Graves', -12, 12, 1, '')}
-              ${slider('fx_mid', 'Medios', -12, 12, 1, '')}
-              ${slider('fx_treble', 'Agudos', -12, 12, 1, '')}
-            </div>
-            ${slider('fx_comp', 'Compresión', 0, 100, 1, 'Iguala el volumen y alarga las notas')}
-            ${slider('fx_chorus', 'Chorus', 0, 100, 1, 'Sonido más ancho y brillante')}
-            ${slider('fx_delayMix', 'Delay (eco)', 0, 100, 1, '')}
-            ${select('fx_delayTime', 'Tiempo del delay', [['1/4', 'Negra'], ['1/8', 'Corchea'], ['1/8d', 'Corchea con puntillo'], ['1/16', 'Semicorchea'], ['1/4t', 'Tresillo de blanca']])}
-            ${slider('fx_delayFeedback', 'Repeticiones del delay', 0, 90, 1, '')}
-            ${select('fx_reverbType', 'Tipo de reverb', Object.entries(SE.REVERBS).map(([k, v]) => [k, v.name]))}
-            ${slider('fx_reverbMix', 'Cantidad de reverb', 0, 100, 1, '')}
-            ${slider('fx_vibrato', 'Vibrato', 0, 100, 1, '')}
-            ${slider('fx_sustain', 'Sustain (cola de las notas)', 0, 100, 1, '')}
-            ${slider('fx_pan', 'Panorama', -100, 100, 1, '')}
-            ${slider('fx_humanize', 'Humanización', 0, 100, 1, 'Pequeñas variaciones de tiempo y fuerza, como al tocar en vivo')}
-            <p class="muted small">El delay va sincronizado con el tempo del solo.</p>
-          </fieldset>
-          <fieldset>
-            <legend>Acompañamiento y partitura</legend>
-            <div class="grid-2">
-              ${select('chords', 'Acordes', Object.entries(SE.CHORD_INSTRUMENTS).map(([k, v]) => [k, v.name]))}
-              ${select('bass', 'Bajo', Object.entries(SE.BASS_INSTRUMENTS).map(([k, v]) => [k, v.name]))}
-            </div>
-            ${slider('volSolo', 'Volumen del solo', 0, 100, 1, '')}
-            ${slider('volBand', 'Acordes y bajo', 0, 100, 1, '')}
-            ${slider('volDrums', 'Batería (palmas en flamenco)', 0, 100, 1, '')}
-            ${select('transpose', 'Partitura para', [['0', 'Instrumento en Do'], ['2', 'Si♭ (trompeta, clarinete, saxo tenor)'], ['9', 'Mi♭ (saxo alto)'], ['7', 'Fa (trompa)']])}
-            <label class="check"><input type="checkbox" name="tab"> Mostrar tablatura de guitarra</label>
-            <label class="check"><input type="checkbox" name="countIn"> Compás de cuenta antes de empezar</label>
-          </fieldset>
+            <p class="sg-status small" data-sound-status role="status"></p>
+          </section>
+
+          <div class="sg-expert">
+            <fieldset>
+              <legend>Canción</legend>
+              <div class="grid-2">
+                ${select('key', 'Tonalidad', keyOptions)}
+                <label>Tempo<input type="number" name="tempo" min="40" max="300" step="1"></label>
+              </div>
+              <div class="grid-2">
+                ${select('meter', 'Compás', ['4/4', '3/4', '2/4', '5/4', '6/8', '12/8'].map((m) => [m, m]))}
+                ${form.length ? select('choruses', 'Vueltas a la forma', [[1, '1 vuelta'], [2, '2 vueltas'], [3, '3 vueltas'], [4, '4 vueltas']]) : select('bars', 'Compases', [[4, 4], [8, 8], [12, 12], [16, 16], [24, 24], [32, 32]])}
+              </div>
+              ${form.length ? html`<label class="check"><input type="checkbox" name="useSong"> Usar el cifrado de la canción</label>` : ''}
+              <div class="sg-prog" data-prog-box>
+                <label>Progresión <span class="hint">si no se usa el cifrado; un acorde por compás</span>
+                  <input name="progression" maxlength="300" placeholder="Dm7 G7 Cmaj7">
+                </label>
+                <div class="sg-presets" role="group" aria-label="Progresiones">
+                  ${Object.entries(S.PROGRESSIONS).map(([k, v]) => html`<button type="button" class="button button-small button-ghost" data-prog="${k}">${v.name}</button>`)}
+                </div>
+              </div>
+            </fieldset>
+            <fieldset>
+              <legend>Ritmo y fraseo</legend>
+              ${slider('density', 'Densidad de notas', 1, 10, 1, 'De notas largas a ráfagas rápidas')}
+              ${slider('rests', 'Espacio entre frases', 0, 70, 1, 'Respiraciones; el silencio también es música')}
+              ${slider('swing', 'Swing', 0, 100, 1, 'Corcheas desiguales, sensación de tresillo')}
+              <label class="check"><input type="checkbox" name="tuplets"> Tresillos y grupos rápidos</label>
+            </fieldset>
+            <fieldset>
+              <legend>Melodía</legend>
+              ${slider('variability', 'Saltos', 0, 100, 1, 'Bajo: por grados conjuntos. Alto: intervalos amplios')}
+              ${slider('repetition', 'Motivos que vuelven', 0, 100, 1, 'Pregunta y respuesta, riffs')}
+              ${slider('chordFollow', 'Apoyarse en los acordes', 0, 100, 1, 'Caer en terceras, séptimas y novenas en los cambios')}
+              ${slider('chromatic', 'Cromatismos', 0, 60, 1, 'Notas de paso y envolventes del bebop')}
+              ${slider('ornaments', 'Adornos', 0, 80, 1, 'Notas de adorno, ligados, bends')}
+              ${data.theme ? slider('paraphrase', 'Parafrasear la melodía', 0, 100, 1, 'Toma frases del tema que escribisteis en Ensaya') : ''}
+              <div class="grid-2">
+                ${select('register', 'Registro', [['grave', 'Grave'], ['medio', 'Medio'], ['agudo', 'Agudo']])}
+                ${select('range', 'Amplitud', [[1, '1 octava'], [2, '2 octavas'], [3, '3 octavas']])}
+              </div>
+              ${select('scale', 'Escala', [['auto', 'Automática (la de cada acorde)'], ...Object.entries(S.SCALES).map(([k, v]) => [k, `${v.name} (toda la canción)`])])}
+              <label class="check"><input type="checkbox" name="endOnTonic"> Terminar en la tónica</label>
+            </fieldset>
+            <fieldset>
+              <legend>Sonido</legend>
+              <div class="grid-2">
+                ${select('soundPreset', 'Preajuste', [...Object.entries(SE.FX_PRESETS).map(([k, v]) => [k, v.name]), ['custom', 'Personalizado']])}
+                ${select('quality', 'Calidad', [['alta', 'Alta'], ['ligera', 'Ligera (carga antes)']])}
+              </div>
+              <p class="actions sg-inline-actions">
+                <button type="button" class="button button-small" data-act="audition">${icon('play', 14)} Probar sonido</button>
+                <button type="button" class="button button-small button-ghost" data-act="resetFx">Restablecer efectos</button>
+              </p>
+              <details class="sg-fx">
+                <summary>Efectos (reverb, delay, saturación…)</summary>
+                ${slider('fx_drive', 'Saturación / distorsión', 0, 100, 1, '')}
+                <div class="grid-3 sg-eq">
+                  ${slider('fx_bass', 'Graves', -12, 12, 1, '')}
+                  ${slider('fx_mid', 'Medios', -12, 12, 1, '')}
+                  ${slider('fx_treble', 'Agudos', -12, 12, 1, '')}
+                </div>
+                ${slider('fx_comp', 'Compresión', 0, 100, 1, '')}
+                ${slider('fx_chorus', 'Chorus', 0, 100, 1, '')}
+                ${slider('fx_delayMix', 'Delay (eco)', 0, 100, 1, 'Sincronizado con el tempo')}
+                ${select('fx_delayTime', 'Tiempo del delay', [['1/4', 'Negra'], ['1/8', 'Corchea'], ['1/8d', 'Corchea con puntillo'], ['1/16', 'Semicorchea'], ['1/4t', 'Tresillo de blanca']])}
+                ${slider('fx_delayFeedback', 'Repeticiones del delay', 0, 90, 1, '')}
+                ${select('fx_reverbType', 'Tipo de reverb', Object.entries(SE.REVERBS).map(([k, v]) => [k, v.name]))}
+                ${slider('fx_reverbMix', 'Cantidad de reverb', 0, 100, 1, '')}
+                ${slider('fx_vibrato', 'Vibrato', 0, 100, 1, '')}
+                ${slider('fx_sustain', 'Sustain', 0, 100, 1, '')}
+                ${slider('fx_pan', 'Panorama', -100, 100, 1, '')}
+                ${slider('fx_humanize', 'Humanización', 0, 100, 1, 'Pequeñas variaciones, como al tocar en vivo')}
+              </details>
+            </fieldset>
+            <fieldset>
+              <legend>Banda y partitura</legend>
+              <div class="grid-2">
+                ${select('chords', 'Acordes', Object.entries(SE.CHORD_INSTRUMENTS).map(([k, v]) => [k, v.name]))}
+                ${select('bass', 'Bajo', Object.entries(SE.BASS_INSTRUMENTS).map(([k, v]) => [k, v.name]))}
+              </div>
+              ${slider('volSolo', 'Volumen del solo', 0, 100, 1, '')}
+              ${slider('volBand', 'Acordes y bajo', 0, 100, 1, '')}
+              ${slider('volDrums', 'Batería', 0, 100, 1, '')}
+              ${select('transpose', 'Partitura para', [['0', 'Instrumento en Do'], ['2', 'Si♭ (trompeta, clarinete, saxo tenor)'], ['9', 'Mi♭ (saxo alto)'], ['7', 'Fa (trompa)']])}
+              <label class="check"><input type="checkbox" name="tab"> Tablatura de guitarra</label>
+              <label class="check"><input type="checkbox" name="countIn"> Compás de cuenta antes de empezar</label>
+            </fieldset>
+          </div>
         </form>
 
         <section class="sg-output">
-          <div class="sg-bar">
-            <button type="button" class="button button-play" data-act="new" title="Nuevo solo (N)">${icon('plus', 18)} Nuevo solo</button>
-            <button type="button" class="button button-ghost" data-act="play" aria-pressed="false" title="Escuchar (espacio)">${icon('play', 16)} Escuchar</button>
-            <button type="button" class="button button-ghost" data-act="loop" aria-pressed="false">Bucle</button>
-            <span class="sg-history">
-              <button type="button" class="button button-icon" data-act="prev" aria-label="Solo anterior">‹</button>
-              <output data-history-pos>1 / 1</output>
-              <button type="button" class="button button-icon" data-act="next" aria-label="Solo siguiente">›</button>
-            </span>
-          </div>
-          <p class="muted small sg-meta" data-meta></p>
+          <p class="sg-meta" data-meta></p>
           <div class="sg-score" data-score aria-live="polite"></div>
           <div class="sg-actions">
-            <label class="sg-title-label">Nombre al guardar<input name="saveTitle" data-save-title maxlength="150" value="Solo · ${song.title}"></label>
-            <button type="button" class="button" data-act="save">Guardar como partitura</button>
-            <button type="button" class="button button-ghost" data-act="midi">Descargar MIDI</button>
-            <button type="button" class="button button-ghost" data-act="link">Copiar enlace a este solo</button>
-            <button type="button" class="button button-ghost" data-act="print">Imprimir</button>
+            <label class="sg-title-label">Nombre<input name="saveTitle" data-save-title maxlength="150" value="Solo · ${song.title}"></label>
+            <button type="button" class="button" data-act="save">Guardar en la canción</button>
+            <details class="sg-more">
+              <summary class="button button-ghost">Más</summary>
+              <div class="sg-more-menu">
+                <button type="button" class="button button-ghost button-small" data-act="midi">Descargar MIDI</button>
+                <button type="button" class="button button-ghost button-small" data-act="link">Copiar enlace</button>
+                <button type="button" class="button button-ghost button-small" data-act="print">Imprimir</button>
+              </div>
+            </details>
           </div>
-          <p class="muted small">Atajos: <kbd>N</kbd> nuevo solo, <kbd>espacio</kbd> escuchar o parar. El enlace reproduce exactamente este solo en el móvil de tus compañeros. Pulsa una nota de la partitura para oírla. Sonidos: bancos MusyngKite y FluidR3 GM (Creative Commons), descargados de GitHub Pages.</p>
+          <p class="muted small sg-help">Pulsa una nota para oírla. <kbd>N</kbd> otro solo · <kbd>espacio</kbd> escuchar. El enlace reproduce este mismo solo en el móvil de tus compañeros.</p>
         </section>
       </div>`;
     res.html(layout(res.ctx, { title: `Generador de solos · ${song.title}`, active: 'repertorio', scripts: ['/vendor/abcjs-basic-min.js', '/solo-engine.js', '/sound-engine.js', '/solos.js'], body }));
   });
 
-  app.post('/api/g/:gid/canciones/:sid/solos', { bodyLimit: 256 * 1024 }, loadGroup, async (req, res) => {
+  app.post('/api/g/:gid/canciones/:sid/solos', { bodyLimit: 512 * 1024 }, loadGroup, async (req, res) => {
     const song = await loadSong(req, req.params.sid);
     const abc = typeof req.body.abc === 'string' ? req.body.abc.slice(0, 100000) : '';
     if (!/^X:\s*1/m.test(abc) || !/^K:/m.test(abc)) throw new HttpError(400, 'Solo no válido');
     const title = str(req.body.title, 150) || `Solo · ${song.title}`;
     const finalAbc = abc.replace(/^T:.*$/m, `T:${title.replace(/[\r\n]/g, ' ')}`);
+    const model = cleanModel(req.body.model);
     const [sc] = await sql`
-      INSERT INTO scores (group_id, song_id, title, abc, created_by, updated_by)
-      VALUES (${req.group.id}, ${song.id}, ${title}, ${finalAbc}, ${req.session.user.id}, ${req.session.user.id})
+      INSERT INTO scores (group_id, song_id, title, abc, model, created_by, updated_by)
+      VALUES (${req.group.id}, ${song.id}, ${title}, ${finalAbc}, ${model ? sql.json(model) : null}, ${req.session.user.id}, ${req.session.user.id})
       RETURNING id`;
     await sql`UPDATE songs SET updated_at = now() WHERE id = ${song.id}`;
     res.json({ id: sc.id, url: `/g/${req.group.id}/partituras/${sc.id}` }, 201);
   });
 };
+
+module.exports.cleanModel = cleanModel;

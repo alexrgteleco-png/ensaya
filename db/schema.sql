@@ -204,3 +204,7 @@ CREATE TABLE IF NOT EXISTS usage_counters (
   value   bigint NOT NULL DEFAULT 0,
   PRIMARY KEY (month, metric)
 );
+
+-- Melodías escritas con el editor sencillo (o guardadas desde el generador de solos):
+-- notas en JSON además del ABC, para poder editarlas con el teclado en pantalla.
+ALTER TABLE scores ADD COLUMN IF NOT EXISTS model jsonb;

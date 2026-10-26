@@ -1,10 +1,12 @@
-/* Página del generador de solos: controles, partitura (abcjs), historial, enlace y sonido (Web Audio). */
+/* Página del generador de solos: modos principiante y experto, partitura (abcjs), historial, enlace
+ * y sonido con muestras reales, efectos y banda de acompañamiento del estilo (Web Audio). */
 (function () {
   'use strict';
   var root = document.querySelector('[data-solo-generator]');
   if (!root) return;
   var E = window.Ensaya;
   var S = window.SoloEngine;
+  var SE = window.SoundEngine;
   var A = window.ABCJS;
   var data = JSON.parse(document.getElementById('solo-data').textContent);
   var form = root.querySelector('[data-controls]');
@@ -13,18 +15,19 @@
   var histOut = root.querySelector('[data-history-pos]');
   var playBtn = root.querySelector('[data-act="play"]');
   var loopBtn = root.querySelector('[data-act="loop"]');
-  var STORE = 'ensaya.solos.' + data.song.id;
+  var statusEl = root.querySelector('[data-sound-status]');
+  var STORE = 'ensaya.solos2.' + data.song.id;
 
-  var GEN_KEYS = ['style', 'key', 'scale', 'tempo', 'meter', 'bars', 'density', 'rests', 'swing', 'variability', 'repetition', 'chordFollow', 'chromatic', 'ornaments', 'register', 'range', 'endOnTonic', 'progression'];
-  var SEN = window.SoundEngine;
+  var GEN_KEYS = ['style', 'level', 'key', 'tempo', 'meter', 'choruses', 'bars', 'progression', 'useSong', 'density', 'rests', 'swing', 'tuplets', 'variability', 'repetition', 'chordFollow', 'chromatic', 'ornaments', 'paraphrase', 'register', 'range', 'scale', 'endOnTonic'];
+  var LEVEL_KEYS = ['density', 'variability', 'rests', 'swing', 'chromatic', 'ornaments', 'repetition', 'chordFollow', 'range', 'register', 'scale'];
   var UI_DEFAULTS = (function () {
-    var d = { instrument: 'gtr_rock', soundPreset: 'lead_rock', quality: 'alta', chords: 'pno_bright', bass: 'bass_pick', transpose: '0', volSolo: 80, volBand: 45, volDrums: 50, tab: false, countIn: true };
-    var fx = SEN.presetFx('gtr_rock');
+    var d = { instrument: 'gtr_jazz', soundPreset: 'jazz', quality: 'alta', chords: 'pno_grand', bass: 'bass_upright', transpose: '0', volSolo: 80, volBand: 50, volDrums: 45, tab: false, countIn: true };
+    var fx = SE.presetFx('gtr_jazz');
     Object.keys(fx).forEach(function (k) { d['fx_' + k] = fx[k]; });
     return d;
   })();
 
-  var state = { history: [], pos: -1, current: null, elements: [], loop: false };
+  var state = { history: [], pos: -1, current: null, elements: [], loop: false, mode: 'principiante', flavor: '' };
 
   function load(key, def) {
     try { var v = localStorage.getItem(STORE + key); return v ? JSON.parse(v) : def; } catch (e) { return def; }
@@ -37,34 +40,62 @@
   function setForm(values) {
     Object.keys(values).forEach(function (k) {
       var el = form.elements[k];
-      if (!el) return;
-      if (el.type === 'checkbox') el.checked = Boolean(values[k]);
+      if (!el || values[k] === undefined) return;
+      if (typeof RadioNodeList !== 'undefined' && el instanceof RadioNodeList) el.value = String(values[k]);
+      else if (el.type === 'checkbox') el.checked = values[k] === true || values[k] === 'true';
       else el.value = values[k];
     });
     updateOutputs();
+    updateProgBox();
   }
 
   function readForm() {
     var out = {};
     Array.prototype.forEach.call(form.elements, function (el) {
       if (!el.name) return;
+      if (el.type === 'radio') {
+        if (el.checked) out[el.name] = el.value;
+        return;
+      }
       out[el.name] = el.type === 'checkbox' ? el.checked : el.type === 'range' || el.type === 'number' ? Number(el.value) : el.value;
     });
     return out;
   }
 
+  function updateProgBox() {
+    var box = root.querySelector('[data-prog-box]');
+    var use = form.elements.useSong;
+    if (box) box.hidden = Boolean(use && use.checked);
+  }
+
   // Compases por línea según el ancho de pantalla y lo cargado que esté el solo.
-  function layoutOpts(params) {
+  function layoutOpts(params, extra) {
     var w = scoreEl.clientWidth || window.innerWidth;
     var dense = Number(params.density) >= 7 || params.meter === '12/8';
-    var per = w < 520 ? (dense ? 1 : 2) : w < 900 ? 2 : dense ? 2 : 4;
-    return { barsPerLine: per };
+    var per = w < 520 ? (dense ? 1 : 2) : w < 900 ? 2 : dense ? 3 : 4;
+    var o = { barsPerLine: per };
+    if (extra) Object.keys(extra).forEach(function (k) { o[k] = extra[k]; });
+    return o;
   }
 
   function genParams(values, seed) {
     var p = { seed: seed };
-    GEN_KEYS.forEach(function (k) { p[k] = values[k]; });
+    GEN_KEYS.forEach(function (k) { if (values[k] !== undefined) p[k] = values[k]; });
+    if (values.flavor) p.flavor = values.flavor;
     return p;
+  }
+
+  // Añade los datos de la canción (cifrado y melodía) que no viajan en el enlace.
+  function withSong(p) {
+    var q = Object.assign({}, p);
+    if (q.useSong && data.form && data.form.length) q.form = data.form;
+    if (data.theme && q.paraphrase > 0) q.theme = data.theme;
+    if (state.mode === 'principiante' || q.level) q.tuplets = q.level === 'facil' ? false : q.tuplets !== false;
+    return q;
+  }
+
+  function generate(p, extra) {
+    return S.generate(withSong(p), layoutOpts(p, extra));
   }
 
   function updateOutputs() {
@@ -78,6 +109,36 @@
       else if (name === 'fx_pan') o.textContent = v === 0 ? 'Centro' : v < 0 ? 'Izq. ' + -v : 'Der. ' + v;
       else o.textContent = v + ' %';
     });
+  }
+
+  // Valores del estilo y la dificultad (modo principiante, o al cambiar de estilo en experto).
+  function applyStyle(style, level, withSound) {
+    var vals = S.paramsFor(style, level || 'medio');
+    var set = {};
+    LEVEL_KEYS.forEach(function (k) { set[k] = vals[k]; });
+    set.tuplets = level !== 'facil';
+    set.paraphrase = 0;
+    setForm(set);
+    if (withSound) applyStyleSound(style);
+  }
+
+  function applyStyleSound(style) {
+    var snd = SE.STYLE_SOUND[style];
+    if (!snd) return;
+    setForm({ instrument: snd.instrument, chords: snd.chords, bass: snd.bass, soundPreset: snd.preset || SE.INSTRUMENTS[snd.instrument].preset });
+    var fx = SE.presetFx(snd.instrument);
+    if (snd.preset && SE.FX_PRESETS[snd.preset]) fx = Object.assign({}, SE.FX_DEFAULT, SE.FX_PRESETS[snd.preset].fx);
+    fxToForm(fx);
+    synth.settingsChanged();
+  }
+
+  function setMode(mode) {
+    state.mode = mode === 'experto' ? 'experto' : 'principiante';
+    root.dataset.mode = state.mode;
+    document.querySelectorAll('[data-mode-btn]').forEach(function (b) {
+      b.setAttribute('aria-pressed', String(b.dataset.modeBtn === state.mode));
+    });
+    save('.mode', state.mode);
   }
 
   // ---------- Generar y dibujar ----------
@@ -106,36 +167,56 @@
     var tunes = A.renderAbc(scoreEl, result.abc, opts);
     state.elements = tunes && tunes[0] ? noteElements(tunes[0]) : [];
     var p = result.params;
-    var st = S.STYLES[p.style].name;
-    metaEl.textContent = st + ' · ' + p.key + ' ' + S.SCALES[p.scale].name + ' · ' + p.tempo + ' bpm · ' + p.meter + ' · ' + p.bars + ' compases · acordes: ' + result.chords.slice(0, Math.min(result.chords.length, 8)).join(' ') + ' · solo nº ' + p.seed;
+    var bars = result.bars.length;
+    var parts = [
+      (state.flavor ? '✨ ' + state.flavor + ' · ' : '') + S.STYLES[p.style].name,
+      'en ' + S.parseKey(p.key).name,
+      p.tempo + ' bpm',
+      bars + ' compases' + (p.form && p.form.length ? ' (' + p.choruses + (p.choruses === 1 ? ' vuelta' : ' vueltas') + ')' : ''),
+      'nº ' + p.seed,
+    ];
+    metaEl.textContent = parts.join(' · ');
   }
 
-  function regenerate() {
-    if (!state.current) return;
-    var ui = readForm();
-    var result = S.generate(genParams(ui, state.current.params.seed), layoutOpts(ui));
-    state.current = result;
-    state.history[state.pos] = { seed: result.params.seed, params: genParams(ui, result.params.seed) };
-    render(result);
-    persist();
-    if (synth.playing) synth.restart(result);
-    else synth.warm(result);
-  }
-
-  function newSolo(seed) {
-    var ui = readForm();
-    var s = seed || Math.floor(Math.random() * 4294967295) + 1;
-    var result = S.generate(genParams(ui, s), layoutOpts(ui));
-    state.history = state.history.slice(0, state.pos + 1);
-    state.history.push({ seed: s, params: genParams(ui, s) });
-    if (state.history.length > 30) state.history.shift();
-    state.pos = state.history.length - 1;
+  function show(result) {
     state.current = result;
     render(result);
     updateHistory();
     persist();
     if (synth.playing) synth.restart(result);
     else synth.warm(result);
+  }
+
+  function regenerate() {
+    if (!state.current) return;
+    var ui = readForm();
+    var params = genParams(ui, state.current.params.seed);
+    state.history[state.pos] = { seed: params.seed, params: params, flavor: state.flavor };
+    show(generate(params));
+  }
+
+  function newSolo(seed, extra) {
+    var ui = readForm();
+    var s = seed || Math.floor(Math.random() * 4294967295) + 1;
+    var params = genParams(ui, s);
+    state.history = state.history.slice(0, state.pos + 1);
+    state.history.push({ seed: s, params: params, flavor: state.flavor });
+    if (state.history.length > 40) state.history.shift();
+    state.pos = state.history.length - 1;
+    show(generate(params, extra));
+  }
+
+  // «Inspírame»: ajustes probados para el estilo y la mejor de 12 versiones.
+  function inspire() {
+    var ui = readForm();
+    var s = Math.floor(Math.random() * 4294967295) + 1;
+    var p = S.inspire(ui.style || 'swing', s);
+    state.flavor = p.flavor;
+    var set = {};
+    LEVEL_KEYS.concat(['paraphrase']).forEach(function (k) { if (p[k] !== undefined) set[k] = p[k]; });
+    if (!data.theme) set.paraphrase = 0;
+    setForm(set);
+    newSolo(s, { candidates: 12 });
   }
 
   function goHistory(delta) {
@@ -143,12 +224,9 @@
     if (pos < 0 || pos >= state.history.length) return;
     state.pos = pos;
     var h = state.history[pos];
+    state.flavor = h.flavor || '';
     setForm(h.params);
-    state.current = S.generate(h.params, layoutOpts(h.params));
-    render(state.current);
-    updateHistory();
-    persist();
-    if (synth.playing) synth.restart(state.current);
+    show(generate(h.params));
   }
 
   function updateHistory() {
@@ -162,16 +240,14 @@
     var uiPrefs = {};
     Object.keys(UI_DEFAULTS).forEach(function (k) { uiPrefs[k] = ui[k]; });
     save('.ui', uiPrefs);
-    save('.history', { history: state.history.slice(-30), pos: state.pos });
-    if (state.current) {
+    save('.history', { history: state.history.slice(-40), pos: state.pos });
+    if (state.current && state.history[state.pos]) {
       var hash = 'solo=' + encodeURIComponent(btoa(unescape(encodeURIComponent(JSON.stringify(state.history[state.pos].params)))));
       history.replaceState(null, '', '#' + hash);
     }
   }
 
-  // ---------- Sonido (muestras reales + efectos) ----------
-  var SE = window.SoundEngine;
-  var statusEl = root.querySelector('[data-sound-status]');
+  // ---------- Sonido (muestras reales + efectos + banda) ----------
   var FX_KEYS = Object.keys(SE.FX_DEFAULT);
 
   function fxFromForm(ui) {
@@ -194,13 +270,6 @@
     statusEl.className = 'sg-status small ' + (kind || '');
   }
 
-  function voicing(tones) {
-    return tones.map(function (pc) {
-      var m = 55 + ((pc - 55) % 12 + 12) % 12;
-      return m;
-    }).sort(function (a, b) { return a - b; });
-  }
-
   var synth = (function () {
     var ctx = null;
     var engine = null;
@@ -208,7 +277,6 @@
     var startAt = 0;
     var timer = null;
     var raf = null;
-    var loading = null;
 
     function ensure() {
       if (!ctx) {
@@ -229,7 +297,7 @@
 
     function samples() {
       var ui = readForm();
-      var inst = SE.INSTRUMENTS[ui.instrument] || SE.INSTRUMENTS.gtr_rock;
+      var inst = SE.INSTRUMENTS[ui.instrument] || SE.INSTRUMENTS.gtr_jazz;
       return {
         solo: inst.sample,
         chords: (SE.CHORD_INSTRUMENTS[ui.chords] || {}).sample || null,
@@ -240,16 +308,16 @@
     function requestsFor(result) {
       var s = samples();
       var solo = {};
+      var chordNotes = {};
+      var bassNotes = {};
       result.events.notes.forEach(function (n) {
         if (n.rest) return;
         solo[n.midi] = true;
         if (n.grace) solo[n.grace] = true;
       });
-      var chordNotes = {};
-      var bassNotes = {};
-      result.events.chords.forEach(function (c) {
-        voicing(c.tones).forEach(function (m) { chordNotes[m] = true; });
-        bassNotes[36 + c.root] = true;
+      (result.events.band || []).forEach(function (b) {
+        if (b.part === 'bass') bassNotes[b.midi] = true;
+        if (b.part === 'chord') b.midis.forEach(function (m) { chordNotes[m] = true; });
       });
       var keys = function (o) { return Object.keys(o).map(Number); };
       return [
@@ -262,57 +330,16 @@
     // Descarga las muestras que falten (sin bloquear más de 15 s).
     function prepare(result) {
       ensure();
-      var reqs = requestsFor(result);
-      var p = engine.preload(reqs, function (done, total, failed) {
+      var p = engine.preload(requestsFor(result), function (done, total, failed) {
         if (total) setStatus('Cargando sonidos reales… ' + done + ' de ' + total, 'loading');
         if (done === total) {
           if (failed === total && total > 0) setStatus('Sin conexión con el banco de sonidos: se usa sonido sintetizado.', 'warn');
           else if (failed) setStatus('Sonidos listos (' + failed + ' notas con sonido sintetizado).', 'ok');
-          else setStatus('Sonidos reales listos.', 'ok');
+          else setStatus('', 'ok');
         }
       });
       var timeout = new Promise(function (resolve) { setTimeout(function () { resolve({ timeout: true }); }, 15000); });
-      loading = Promise.race([p, timeout]);
-      return loading;
-    }
-
-    function scheduleDrums(result, t0) {
-      var ev = result.events;
-      var p = result.params;
-      var bpb = ev.beatsPerBar;
-      var beat = ev.beatSec;
-      var swing = p.swing / 100;
-      var compound = p.meter === '6/8' || p.meter === '12/8';
-      for (var b = 0; b < ev.chords.length; b++) {
-        for (var k = 0; k < bpb; k++) {
-          var t = t0 + (b * bpb + k) * beat;
-          if (p.style === 'flamenco') {
-            // Palmas: acentos en cada pulso y contratiempos.
-            engine.drum('clap', t, k === 0 ? 1 : 0.7);
-            if (compound) engine.drum('clap', t + (2 * beat) / 3, 0.45);
-            else engine.drum('clap', t + beat / 2, 0.45);
-            if (k === 0) engine.drum('kick', t, 0.5);
-            continue;
-          }
-          if (p.style === 'jazz') {
-            engine.drum('ride', t, 0.9);
-            engine.drum('ride', t + beat * (0.5 + swing * 0.1667), 0.55);
-            if (k % 2 === 1) engine.drum('hat', t, 0.6);
-            if (k === 0) engine.drum('kick', t, 0.4);
-            continue;
-          }
-          if (k === 0 || (bpb === 4 && k === 2)) engine.drum('kick', t);
-          if ((bpb === 4 && (k === 1 || k === 3)) || (bpb === 2 && k === 1) || (bpb === 3 && k === 1)) engine.drum('snare', t);
-          if (compound) {
-            for (var s = 0; s < 3; s++) engine.drum('hat', t + (s * beat) / 3, s === 0 ? 1 : 0.6);
-          } else if (p.style === 'funk' || p.style === 'metal') {
-            for (var q = 0; q < 4; q++) engine.drum('hat', t + (q * beat) / 4, q === 0 ? 1 : 0.5);
-          } else {
-            engine.drum('hat', t, 1);
-            engine.drum('hat', t + beat * (0.5 + swing * 0.1667), 0.6);
-          }
-        }
-      }
+      return Promise.race([p, timeout]);
     }
 
     function scheduleAll(result, t0) {
@@ -332,27 +359,25 @@
         }
         engine.soloNote(s.solo, n.midi, t, n.duration, n.velocity);
       });
-      ev.chords.forEach(function (c) {
-        voicing(c.tones).forEach(function (m) { engine.bandNote(s.chords, m, t0 + c.time, c.duration * 0.98, 0.42, 'pad'); });
-        for (var k = 0; k < ev.beatsPerBar; k++) {
-          var bassMidi = 36 + c.root;
-          engine.bandNote(s.bass, bassMidi, t0 + c.time + k * ev.beatSec, ev.beatSec * 0.9, k === 0 ? 0.95 : 0.75, 'bass');
-        }
+      (ev.band || []).forEach(function (b) {
+        var t = t0 + b.time;
+        if (b.part === 'bass') engine.bandNote(s.bass, b.midi, t, b.duration, b.velocity, 'bass');
+        else if (b.part === 'chord') b.midis.forEach(function (m) { engine.bandNote(s.chords, m, t, b.duration, b.velocity, 'pad'); });
+        else if (b.part === 'drum') engine.drum(b.type, t, b.velocity);
       });
-      scheduleDrums(result, t0);
     }
 
     function highlight() {
       if (!api.playing || !current) return;
       var tNow = ctx.currentTime - startAt;
       var notes = current.events.notes;
-      var activeIdx = -1;
+      var active = -1;
       for (var i = 0; i < notes.length; i++) {
-        if (notes[i].time <= tNow) activeIdx = i;
+        if (notes[i].time <= tNow) active = notes[i].index;
         else break;
       }
       state.elements.forEach(function (set, i) {
-        set.forEach(function (el) { el.classList.toggle('sg-active', i === activeIdx); });
+        set.forEach(function (el) { el.classList.toggle('sg-active', i === active); });
       });
       raf = requestAnimationFrame(highlight);
     }
@@ -437,13 +462,14 @@
         ensure();
         var ui = readForm();
         var s = samples();
-        var base = S.spellScale(ui.key, ui.scale).notes.map(function (n) { return n.pc; });
-        var start = { grave: 45, medio: 57, agudo: 64 }[ui.register] || 57;
+        var k = S.parseKey(ui.key);
+        var base = (k.minor ? [0, 2, 3, 5, 7, 9, 10] : [0, 2, 4, 5, 7, 9, 11]).map(function (iv) { return (k.root.pc + iv) % 12; });
+        var start = { grave: 45, medio: 59, agudo: 66 }[ui.register] || 59;
         var run = [];
         for (var m = start; run.length < 8; m++) if (base.indexOf(m % 12) >= 0) run.push(m);
         run = run.concat(run.slice(0, 7).reverse());
         engine.preload([{ sample: s.solo, midis: run }], function (d, tot) { if (tot) setStatus('Cargando sonidos reales… ' + d + ' de ' + tot, 'loading'); }).then(function () {
-          setStatus('Sonidos reales listos.', 'ok');
+          setStatus('', 'ok');
           var t = ctx.currentTime + 0.05;
           var step = 60 / (Number(ui.tempo) || 100) / 2;
           run.forEach(function (mm, i) {
@@ -458,8 +484,7 @@
   function applyPreset(id) {
     var pr = SE.FX_PRESETS[id];
     if (!pr) return;
-    var fx = Object.assign({}, SE.FX_DEFAULT, pr.fx);
-    fxToForm(fx);
+    fxToForm(Object.assign({}, SE.FX_DEFAULT, pr.fx));
   }
 
   // ---------- Eventos ----------
@@ -467,8 +492,9 @@
   form.addEventListener('input', function (e) {
     updateOutputs();
     var name = e.target.name;
-    if (name === 'style') return; // lo trata 'change'
+    if (name === 'style' || name === 'level' || name === 'useSong') return; // los trata 'change'
     if (GEN_KEYS.indexOf(name) >= 0) {
+      state.flavor = '';
       clearTimeout(regenTimer);
       regenTimer = setTimeout(regenerate, 160);
       if (name === 'tempo') synth.settingsChanged();
@@ -504,19 +530,22 @@
     }
   });
   form.addEventListener('change', function (e) {
-    if (e.target.name === 'style') {
-      // Al cambiar de estilo se cargan sus valores típicos (luego se pueden retocar).
-      var st = data.styles[e.target.value];
-      setForm({ scale: st.scale, density: st.density, variability: st.variability, rests: st.rests, swing: st.swing, chromatic: st.chromatic, ornaments: st.ornaments, repetition: st.repetition });
-      if (st.progression) form.elements.progression.value = S.progressionFor(form.elements.key.value, st.progression);
-      else if (data.songProgression) form.elements.progression.value = data.songProgression;
-      // Y el sonido típico del estilo: su guitarra, acompañamiento, bajo y efectos.
-      var snd = SE.STYLE_SOUND[e.target.value];
-      if (snd) {
-        setForm({ instrument: snd.instrument, chords: snd.chords, bass: snd.bass, soundPreset: SE.INSTRUMENTS[snd.instrument].preset });
-        fxToForm(SE.presetFx(snd.instrument));
-        synth.settingsChanged();
-      }
+    var name = e.target.name;
+    if (name === 'style') {
+      // Nuevo estilo: sus valores típicos y su sonido (guitarra, banda, efectos), y un solo nuevo.
+      var ui = readForm();
+      applyStyle(ui.style, state.mode === 'principiante' ? ui.level : 'medio', true);
+      if (!ui.useSong && S.STYLES[ui.style].progression) form.elements.progression.value = '';
+      if (form.elements.bars) form.elements.bars.value = ui.style === 'blues' ? '12' : form.elements.bars.value;
+      state.flavor = '';
+      newSolo();
+    } else if (name === 'level') {
+      var u = readForm();
+      applyStyle(u.style, u.level, false);
+      state.flavor = '';
+      newSolo();
+    } else if (name === 'useSong') {
+      updateProgBox();
       regenerate();
     }
   });
@@ -526,8 +555,7 @@
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(function () {
       if (!state.current) return;
-      var p = state.current.params;
-      var re = S.generate(p, layoutOpts(p));
+      var re = generate(state.history[state.pos].params);
       if (re.abc !== state.current.abc) {
         state.current = re;
         render(re);
@@ -537,9 +565,21 @@
 
   root.querySelectorAll('[data-prog]').forEach(function (b) {
     b.addEventListener('click', function () {
-      form.elements.progression.value = b.dataset.prog === 'song' ? data.songProgression : S.progressionFor(form.elements.key.value, b.dataset.prog);
-      if (b.dataset.prog === 'blues' && Number(form.elements.bars.value) < 12) form.elements.bars.value = '12';
+      form.elements.progression.value = S.progressionFor(form.elements.key.value, b.dataset.prog);
+      if (b.dataset.prog === 'blues' && form.elements.bars && Number(form.elements.bars.value) < 12) form.elements.bars.value = '12';
       regenerate();
+    });
+  });
+
+  document.querySelectorAll('[data-mode-btn]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      setMode(b.dataset.modeBtn);
+      if (state.mode === 'principiante') {
+        // Al volver a principiante, se recuperan los valores del estilo y la dificultad.
+        var ui = readForm();
+        applyStyle(ui.style, ui.level, false);
+        regenerate();
+      }
     });
   });
 
@@ -547,7 +587,8 @@
     var b = e.target.closest('[data-act]');
     if (!b) return;
     var act = b.dataset.act;
-    if (act === 'new') newSolo();
+    if (act === 'new') { state.flavor = ''; newSolo(); }
+    if (act === 'inspire') inspire();
     if (act === 'audition') synth.audition();
     if (act === 'resetFx') {
       fxToForm(SE.presetFx(form.elements.instrument.value));
@@ -575,12 +616,28 @@
     if (act === 'print') window.print();
   });
 
+  // Melodía en notas (para poder editarla luego con el editor sencillo).
+  function modelFrom(result) {
+    var notes = [];
+    result.bars.forEach(function (bar, bi) {
+      bar.notes.forEach(function (n) {
+        if (n.tieFrom && notes.length && !n.rest) {
+          notes[notes.length - 1].ticks += n.ticks;
+          return;
+        }
+        notes.push({ tick: bi * result.barTicks + n.tick, ticks: n.ticks, midi: n.rest ? null : n.midi, tuplet: n.tuplet || 0 });
+      });
+    });
+    var p = result.params;
+    return { kind: 'solo', key: p.key, meter: p.meter, tempo: p.tempo, chords: result.events.chords.map(function (c) { return { tick: Math.round(c.time / result.events.tickSec), name: c.name }; }), notes: notes };
+  }
+
   async function saveScore(btn) {
     btn.disabled = true;
     try {
       var title = root.querySelector('[data-save-title]').value.trim();
-      var r = await E.api('POST', data.save, { abc: state.current.abc, title: title });
-      E.toast('Guardado en las partituras de la canción');
+      var r = await E.api('POST', data.save, { abc: state.current.abc, title: title, model: modelFrom(state.current) });
+      E.toast('Guardado en la canción');
       btn.textContent = 'Guardado ✓ · ver';
       btn.disabled = false;
       btn.onclick = function () { location.href = r.url; };
@@ -609,7 +666,7 @@
 
   document.addEventListener('keydown', function (e) {
     if (e.target.closest('input, select, textarea, button') || e.metaKey || e.ctrlKey || e.altKey) return;
-    if (e.key === 'n' || e.key === 'N') newSolo();
+    if (e.key === 'n' || e.key === 'N') { state.flavor = ''; newSolo(); }
     if (e.key === ' ') {
       e.preventDefault();
       playBtn.click();
@@ -618,6 +675,7 @@
 
   // ---------- Inicio ----------
   (function init() {
+    setMode(load('.mode', 'principiante'));
     var fromLink = null;
     var m = /solo=([^&]+)/.exec(location.hash);
     if (m) {
@@ -625,35 +683,26 @@
     }
     var stored = load('.history', null);
     var storedUi = load('.ui', {});
-    if (storedUi.instrument && !SEN.INSTRUMENTS[storedUi.instrument]) delete storedUi.instrument;
+    if (storedUi.instrument && !SE.INSTRUMENTS[storedUi.instrument]) delete storedUi.instrument;
     var ui = Object.assign({}, UI_DEFAULTS, storedUi);
-    if (!storedUi.instrument) {
-      // Primera vez: sonido del estilo por defecto.
-      var snd0 = SEN.STYLE_SOUND[(data.defaults && data.defaults.style) || 'rock'];
-      if (snd0) {
-        ui.instrument = snd0.instrument; ui.chords = snd0.chords; ui.bass = snd0.bass; ui.soundPreset = SEN.INSTRUMENTS[snd0.instrument].preset;
-        var fx0 = SEN.presetFx(snd0.instrument);
-        Object.keys(fx0).forEach(function (k) { ui['fx_' + k] = fx0[k]; });
-      }
-    }
+    var first = !storedUi.instrument;
     if (fromLink) {
       setForm(Object.assign({}, data.defaults, ui, fromLink));
       state.history = stored && stored.history ? stored.history : [];
-      state.history.push({ seed: fromLink.seed, params: fromLink });
+      state.history.push({ seed: fromLink.seed, params: fromLink, flavor: fromLink.flavor || '' });
       state.pos = state.history.length - 1;
-      state.current = S.generate(fromLink, layoutOpts(fromLink));
-      render(state.current);
-      updateHistory();
-      persist();
+      state.flavor = fromLink.flavor || '';
+      show(generate(fromLink));
     } else if (stored && stored.history && stored.history.length) {
       state.history = stored.history;
       state.pos = Math.min(stored.pos, stored.history.length - 1);
-      setForm(Object.assign({}, data.defaults, ui, state.history[state.pos].params));
-      state.current = S.generate(state.history[state.pos].params, layoutOpts(state.history[state.pos].params));
-      render(state.current);
-      updateHistory();
+      var h = state.history[state.pos];
+      state.flavor = h.flavor || '';
+      setForm(Object.assign({}, data.defaults, ui, h.params));
+      show(generate(h.params));
     } else {
       setForm(Object.assign({}, data.defaults, ui));
+      if (first) applyStyleSound(data.defaults.style);
       newSolo();
     }
   })();
